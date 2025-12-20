@@ -23,32 +23,43 @@ model = GPT2.from_pretrained("gpt2")
 
 ## Architecture
 
-```
-Token IDs (batch, seq)
-    │
-    ▼
-┌─────────────────────────────────┐
-│  Token Embedding + Position Emb │
-│  + Dropout                      │
-└─────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────┐
-│  Transformer Block (×N)         │
-│  ┌─────────────────────────────┐│
-│  │ LayerNorm → Attention → +  ││
-│  │ LayerNorm → MLP → +        ││
-│  └─────────────────────────────┘│
-└─────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────┐
-│  Final LayerNorm                │
-│  Linear → Logits                │
-└─────────────────────────────────┘
-    │
-    ▼
-Logits (batch, seq, vocab_size)
+```mermaid
+flowchart TB
+    input["Token IDs (batch, seq)"]
+    
+    subgraph embed ["Embeddings"]
+        tok_emb["Token Embedding"]
+        pos_emb["Position Embedding"]
+        add_emb(("+"))
+        dropout["Dropout"]
+    end
+    
+    subgraph blocks ["Transformer Blocks ×N"]
+        subgraph block ["Pre-Norm Block"]
+            ln1["LayerNorm"] --> attn["Causal Self-Attention"]
+            attn --> add1(("+"))
+            add1 --> ln2["LayerNorm"]
+            ln2 --> mlp["MLP (GELU)"]
+            mlp --> add2(("+"))
+        end
+    end
+    
+    subgraph output ["Output"]
+        ln_final["Final LayerNorm"]
+        lm_head["Linear (tied weights)"]
+    end
+    
+    logits["Logits (batch, seq, vocab)"]
+    
+    input --> tok_emb
+    input --> pos_emb
+    tok_emb --> add_emb
+    pos_emb --> add_emb
+    add_emb --> dropout
+    dropout --> blocks
+    blocks --> ln_final
+    ln_final --> lm_head
+    lm_head --> logits
 ```
 
 ## Key Concepts
