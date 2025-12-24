@@ -18,6 +18,8 @@ app = typer.Typer(help="Clean up local logs and cache files", add_completion=Fal
 # Directories to clean (log directories only - not Python artifacts)
 CLEAN_DIRS = [
     "wandb",           # Wandb run logs
+    "logs",            # JSON metrics logs
+    "plots",           # Generated plot images
 ]
 
 
