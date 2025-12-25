@@ -188,3 +188,71 @@ def get_wikipedia_sample(
     )
     return load_wikipedia(config)
 
+
+def load_wikipedia_train_val(
+    config: Optional[WikipediaConfig] = None,
+    val_fraction: float = 0.05,
+) -> tuple[Dataset, Dataset]:
+    """Load Wikipedia dataset split into training and validation sets.
+
+    This function automatically handles the train/val split by reserving
+    a portion of the dataset for validation. Since the Wikipedia dataset
+    doesn't have a built-in validation split, we reserve the last portion
+    of the dataset for validation.
+
+    Args:
+        config: Configuration for loading the dataset. If None, uses defaults.
+            Note: The split in config will be ignored - this function handles
+            the split internally.
+        val_fraction: Fraction of dataset to reserve for validation (default: 0.05 = 5%).
+
+    Returns:
+        Tuple of (train_dataset, val_dataset) HuggingFace datasets.
+
+    Example:
+        >>> train_data, val_data = load_wikipedia_train_val()
+        >>> print(f"Train: {len(train_data):,}, Val: {len(val_data):,}")
+    """
+    if config is None:
+        config = WikipediaConfig()
+
+    # Load full dataset to determine size
+    full_config = WikipediaConfig(
+        subset=config.subset,
+        split="train",
+        streaming=False,  # Need to know length, so can't use streaming
+        cache_dir=config.cache_dir,
+    )
+    full_dataset = load_wikipedia(full_config)
+    full_size = len(full_dataset)
+
+    # Calculate train/val split
+    val_size = max(1, int(full_size * val_fraction))
+    train_size = full_size - val_size
+
+    # Load training split (first portion)
+    # Note: We use streaming=False for splits since we need to slice the dataset
+    # The actual streaming happens in StreamingTextDataset during training
+    train_config = WikipediaConfig(
+        subset=config.subset,
+        split=f"train[:{train_size}]",
+        streaming=False,
+        cache_dir=config.cache_dir,
+    )
+    train_dataset = load_wikipedia(train_config)
+
+    # Load validation split (last portion)
+    val_config = WikipediaConfig(
+        subset=config.subset,
+        split=f"train[-{val_size}:]",
+        streaming=False,
+        cache_dir=config.cache_dir,
+    )
+    val_dataset = load_wikipedia(val_config)
+    
+    print(f"Loaded Wikipedia dataset:")
+    print(f"  Training articles: {len(train_dataset):,} ({train_size/full_size*100:.1f}%)")
+    print(f"  Validation articles: {len(val_dataset):,} ({val_size/full_size*100:.1f}%)")
+
+    return train_dataset, val_dataset
+

@@ -13,6 +13,7 @@ Streaming utilities:
 
 from allformers.data.wikipedia import (
     load_wikipedia,
+    load_wikipedia_train_val,
     iter_wikipedia_texts,
     get_wikipedia_sample,
     WikipediaConfig,
@@ -27,6 +28,7 @@ from allformers.data.streaming import (
 __all__ = [
     # Wikipedia
     "load_wikipedia",
+    "load_wikipedia_train_val",
     "iter_wikipedia_texts",
     "get_wikipedia_sample",
     "WikipediaConfig",

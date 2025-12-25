@@ -6,7 +6,7 @@ inspired by https://github.com/lucidrains/x-transformers/blob/main/train_enwik8.
 
 Usage:
     uv run python train_wikipedia.py --help
-    uv run python train_wikipedia.py --num-batches 1000 --track-online
+    uv run python train_wikipedia.py --num-tokens 0.1 --track-online
 """
 
 import json
@@ -18,12 +18,13 @@ from typing import Annotated
 import tqdm
 import torch
 import torch.optim as optim
+from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 import typer
 import wandb
 
 from allformers.models.gpt2.gpt2 import GPT2, GPT2Config
-from allformers.data import load_wikipedia, WikipediaConfig, StreamingTextDataset
+from allformers.data import load_wikipedia_train_val, StreamingTextDataset
 from transformers import AutoTokenizer
 
 
@@ -54,35 +55,6 @@ def decode_tokens(tokenizer, tokens):
     return tokenizer.decode(tokens.tolist())
 
 
-# =============================================================================
-# Data Preparation
-# =============================================================================
-
-
-def load_datasets(num_train: int, num_val: int):
-    """Load Wikipedia datasets for training and validation.
-    
-    Args:
-        num_train: Number of training articles to load.
-        num_val: Number of validation articles to load.
-        
-    Returns:
-        Tuple of (train_dataset, val_dataset) HuggingFace datasets.
-    """
-    print(f"Loading {num_train} training articles and {num_val} validation articles...")
-
-    # Load training data
-    train_config = WikipediaConfig(split=f"train[:{num_train}]")
-    train_dataset = load_wikipedia(train_config)
-
-    # Load validation data (from a different slice)
-    val_config = WikipediaConfig(split=f"train[{num_train}:{num_train + num_val}]")
-    val_dataset = load_wikipedia(val_config)
-
-    print(f"Train articles: {len(train_dataset):,}")
-    print(f"Val articles: {len(val_dataset):,}")
-
-    return train_dataset, val_dataset
 
 
 # =============================================================================
@@ -93,19 +65,19 @@ def load_datasets(num_train: int, num_val: int):
 @app.command()
 def train(
     # Training hyperparameters
-    num_batches: Annotated[int, typer.Option(help="Number of training batches")] = 10000,
-    batch_size: Annotated[int, typer.Option(help="Batch size")] = 4,
+    num_tokens: Annotated[float, typer.Option(help="Total number of tokens to train on (in billions, e.g., 0.01 = 10M tokens)")] = 0.01,
+    batch_size: Annotated[int, typer.Option(help="Batch size")] = 32,
     gradient_accumulate: Annotated[int, typer.Option(help="Gradient accumulation steps")] = 1,
     learning_rate: Annotated[float, typer.Option(help="Learning rate")] = 3e-4,
     seq_len: Annotated[int, typer.Option(help="Sequence length")] = 512,
+    # Performance optimizations
+    use_amp: Annotated[bool, typer.Option(help="Use mixed precision training (AMP)")] = True,
+    use_compile: Annotated[bool, typer.Option(help="Use torch.compile for model optimization")] = True,
     # Logging intervals
     validate_every: Annotated[int, typer.Option(help="Validate every N batches")] = 100,
     val_batches: Annotated[int, typer.Option(help="Number of batches for validation")] = 10,
     generate_every: Annotated[int, typer.Option(help="Generate samples every N batches")] = 500,
     generate_length: Annotated[int, typer.Option(help="Length of generated samples")] = 256,
-    # Data settings
-    num_train_articles: Annotated[int, typer.Option(help="Number of training articles")] = 10000,
-    num_val_articles: Annotated[int, typer.Option(help="Number of validation articles")] = 1000,
     # Model settings
     embedding_dim: Annotated[int, typer.Option(help="Model embedding dimension")] = 512,
     num_heads: Annotated[int, typer.Option(help="Number of attention heads")] = 8,
@@ -125,10 +97,9 @@ def train(
     tokenizer.pad_token = tokenizer.eos_token  # GPT-2 doesn't have a pad token by default
 
     # Load datasets (not tokenized yet - tokenization happens on-the-fly)
-    train_data, val_data = load_datasets(
-        num_train=num_train_articles,
-        num_val=num_val_articles,
-    )
+    # The dataset module handles train/val split automatically
+    print("Loading Wikipedia dataset with automatic train/val split...")
+    train_data, val_data = load_wikipedia_train_val()
 
     # Create streaming datasets that tokenize on-the-fly
     # This avoids loading all tokens into memory upfront
@@ -146,8 +117,19 @@ def train(
     )
 
     # Note: num_workers=0 is required for HuggingFace datasets to avoid pickling issues
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, num_workers=0)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, num_workers=0)
+    # pin_memory=True speeds up GPU transfers when using CUDA
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        num_workers=0,
+        pin_memory=device == "cuda",
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        num_workers=0,
+        pin_memory=device == "cuda",
+    )
     
     # Create iterators (streaming datasets are already infinite)
     train_iter = iter(train_loader)
@@ -165,8 +147,37 @@ def train(
     model = GPT2(config)
     model = model.to(device)
 
+    # Apply torch.compile for faster execution (PyTorch 2.0+)
+    if use_compile and device == "cuda" and hasattr(torch, "compile"):
+        print("Compiling model with torch.compile...")
+        # Use 'default' mode instead of 'reduce-overhead' to avoid CUDA graph issues
+        model = torch.compile(model, mode="default")
+        print("Model compiled successfully!")
+
+    # Calculate number of optimizer steps from num_tokens
+    # num_tokens is in billions, convert to actual token count
+    num_tokens_actual = int(num_tokens * 1e9)
+    # StreamingTextDataset yields (seq_len + 1) tokens, giving us seq_len predictions
+    # Each optimizer step processes batch_size * seq_len * gradient_accumulate tokens
+    tokens_per_batch = batch_size * seq_len
+    tokens_per_step = tokens_per_batch * gradient_accumulate
+    num_steps = num_tokens_actual // tokens_per_step
+    print(f"Training configuration:")
+    print(f"  Total tokens: {num_tokens_actual:,} ({num_tokens}B)")
+    print(f"  Batch size: {batch_size}")
+    print(f"  Sequence length: {seq_len}")
+    print(f"  Gradient accumulation: {gradient_accumulate}")
+    print(f"  Tokens per microbatch: {tokens_per_batch:,}")
+    print(f"  Tokens per optimizer step: {tokens_per_step:,}")
+    print(f"  Number of optimizer steps: {num_steps:,}")
+
     # Optimizer
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
+
+    # Mixed precision training scaler
+    scaler = GradScaler(device=device) if use_amp and device == "cuda" else None
+    if scaler:
+        print("Mixed precision training (AMP) enabled")
 
     # Initialize wandb
     wandb.init(
@@ -174,13 +185,16 @@ def train(
         name=wandb_run_name,
         mode="online" if track_online else "offline",
         config={
-            "num_batches": num_batches,
+            "num_tokens": num_tokens_actual,
+            "num_tokens_billions": num_tokens,
+            "num_steps": num_steps,
+            "tokens_per_step": tokens_per_step,
             "batch_size": batch_size,
             "gradient_accumulate": gradient_accumulate,
             "learning_rate": learning_rate,
+            "use_amp": use_amp and device == "cuda",
+            "use_compile": use_compile and device == "cuda",
             "seq_len": seq_len,
-            "num_train_articles": num_train_articles,
-            "num_val_articles": num_val_articles,
             "embedding_dim": embedding_dim,
             "num_heads": num_heads,
             "num_layers": num_layers,
@@ -201,50 +215,65 @@ def train(
     print("Starting training")
     print("=" * 60)
 
-    for i in tqdm.tqdm(range(num_batches), mininterval=10.0, desc="Training"):
+    tokens_seen = 0
+    for i in tqdm.tqdm(range(num_steps), desc="Training"):
         model.train()
-
-        # Gradient accumulation
         optimizer.zero_grad()
-        total_loss = 0.0
+        accumulated_loss = 0.0
 
         for _ in range(gradient_accumulate):
-            batch = next(train_iter).to(device)
+            batch = next(train_iter).to(device, non_blocking=True)
             input_ids = batch[:, :-1]
             targets = batch[:, 1:]
 
-            _, loss = model(input_ids, targets)
-            (loss / gradient_accumulate).backward()
-            total_loss += loss.item()
+            if scaler:
+                with autocast(device_type=device):
+                    _, loss = model(input_ids, targets)
+                    loss = loss / gradient_accumulate
+                scaler.scale(loss).backward()
+            else:
+                _, loss = model(input_ids, targets)
+                loss = loss / gradient_accumulate
+                loss.backward()
 
-        avg_loss = total_loss / gradient_accumulate
+            accumulated_loss += loss.item()
 
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        # Gradient clipping and optimizer step
+        if scaler:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
 
-        optimizer.step()
+        tokens_seen += tokens_per_step
 
-        # Logging
-        wandb.log({"train_loss": avg_loss, "step": i})
-        metrics_history.append({"step": i, "train_loss": avg_loss})
+        wandb.log({"train_loss": accumulated_loss, "step": i, "tokens_seen": tokens_seen})
+        metrics_history.append({"step": i, "train_loss": accumulated_loss, "tokens_seen": tokens_seen})
         if i % 10 == 0:
-            tqdm.tqdm.write(f"step {i:5d} | train loss: {avg_loss:.4f}")
+            tqdm.tqdm.write(f"step {i:5d} | train loss: {accumulated_loss:.4f} | tokens: {tokens_seen:,}")
 
         # Validation
         if i % validate_every == 0:
             model.eval()
-            val_losses = []
+            total_val_loss = 0.0
             with torch.no_grad():
                 for _ in range(val_batches):
-                    val_batch = next(val_iter).to(device)
+                    val_batch = next(val_iter).to(device, non_blocking=True)
                     val_input = val_batch[:, :-1]
                     val_targets = val_batch[:, 1:]
-                    _, val_loss = model(val_input, val_targets)
-                    val_losses.append(val_loss.item())
+                    if scaler:
+                        with autocast(device_type=device):
+                            _, val_loss = model(val_input, val_targets)
+                    else:
+                        _, val_loss = model(val_input, val_targets)
+                    total_val_loss += val_loss.item()
 
-            avg_val_loss = sum(val_losses) / len(val_losses)
-            wandb.log({"val_loss": avg_val_loss, "step": i})
-            metrics_history.append({"step": i, "val_loss": avg_val_loss})
+            avg_val_loss = total_val_loss / val_batches
+            wandb.log({"val_loss": avg_val_loss, "step": i, "tokens_seen": tokens_seen})
+            metrics_history.append({"step": i, "val_loss": avg_val_loss, "tokens_seen": tokens_seen})
             tqdm.tqdm.write(f"step {i:5d} | val loss: {avg_val_loss:.4f} (avg of {val_batches} batches)")
 
         # Generation
