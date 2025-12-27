@@ -91,6 +91,52 @@ from allformers.data.wikipedia import load_wikipedia  # Full path
 
 Do not put module docstrings in `__init__.py` files. Instead, create a `README.md` in the directory if documentation is needed.
 
+## HuggingFace Datasets
+
+When working with HuggingFace streaming datasets, be aware of resource cleanup issues that can cause tests to hang.
+
+### Avoiding Hangs in Tests
+
+1. **Use small shuffle buffers in tests**: Large buffers (e.g., 1000) take time to fill. Use small buffers (e.g., 10) for faster tests.
+
+2. **Explicitly delete dataset iterators**: Streaming datasets hold network connections. Delete them when done:
+   ```python
+   train_data, val_data = load_dataset_streaming(...)
+   # ... use the data ...
+   del train_data, val_data
+   gc.collect()
+   ```
+
+3. **Disable filters when not testing them**: Language/score filters slow down iteration. Pass `filter_language=None` when the test doesn't need filtering.
+
+4. **Iterate only what you need**: Don't iterate 1000 items when 10 suffice. Streaming datasets are slow to start.
+
+### Example Test Pattern
+
+```python
+def test_streaming_dataset(self):
+    import gc
+    
+    train_data, val_data = load_fineweb_edu_streaming(
+        shuffle_buffer_size=10,      # Small buffer for speed
+        filter_language=None,         # Disable unless testing filtering
+    )
+    
+    # Get just what you need
+    for i, doc in enumerate(train_data):
+        # ... test logic ...
+        if i >= 4:
+            break
+    
+    # Explicit cleanup to avoid hanging
+    del train_data, val_data
+    gc.collect()
+```
+
+### Cleanup Errors
+
+You may see errors like `'[Errno 9] Bad file descriptor'` during cleanup. These are harmless - they occur when the script exits while background download threads are still active.
+
 ## Documentation
 
 - Use docstrings in the actual module files (`.py` files with implementations)

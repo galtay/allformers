@@ -11,6 +11,7 @@ Usage:
     uv run python train_gpt2.py --help
     uv run python train_gpt2.py --dataset wikipedia --num-tokens 0.1
     uv run python train_gpt2.py --dataset finepdfs-edu --num-tokens 0.1
+    uv run python train_gpt2.py --dataset fineweb-edu --num-tokens 0.1
 """
 
 import json
@@ -31,6 +32,7 @@ from allformers.models.gpt2.gpt2 import GPT2, GPT2Config
 from allformers.data.streaming import StreamingTextDataset
 from allformers.data.wikipedia import load_wikipedia_streaming, wikipedia_text_fn
 from allformers.data.finepdfs_edu import load_finepdfs_edu_streaming, finepdfs_edu_text_fn
+from allformers.data.fineweb_edu import load_fineweb_edu_streaming, fineweb_edu_text_fn
 from transformers import AutoTokenizer
 
 
@@ -49,14 +51,21 @@ class DatasetChoice(str, Enum):
     """Available datasets for training."""
     wikipedia = "wikipedia"
     finepdfs_edu = "finepdfs-edu"
+    fineweb_edu = "fineweb-edu"
 
 
 def load_dataset_for_training(
     dataset: DatasetChoice,
     shuffle_buffer_size: int = 10_000,
     seed: int = 42,
-    filter_english: bool = True,
-    english_threshold: float = 0.5,
+    # FinePDFs-Edu options (uses per-page language detection)
+    finepdfs_filter_english: bool = True,
+    finepdfs_english_threshold: float = 0.8,
+    # FineWeb-Edu options (uses language column and language_score)
+    fineweb_subset: str = "sample-10BT",
+    fineweb_min_edu_score: float | None = None,
+    fineweb_language: str | None = "en",
+    fineweb_min_lang_score: float | None = None,
 ) -> tuple:
     """Load train/val streaming datasets for the specified dataset.
     
@@ -77,10 +86,21 @@ def load_dataset_for_training(
         train_data, val_data = load_finepdfs_edu_streaming(
             shuffle_buffer_size=shuffle_buffer_size,
             seed=seed,
-            filter_english=filter_english,
-            english_threshold=english_threshold,
+            filter_english=finepdfs_filter_english,
+            english_threshold=finepdfs_english_threshold,
         )
         return train_data, val_data, finepdfs_edu_text_fn
+    
+    elif dataset == DatasetChoice.fineweb_edu:
+        train_data, val_data = load_fineweb_edu_streaming(
+            subset=fineweb_subset,
+            shuffle_buffer_size=shuffle_buffer_size,
+            seed=seed,
+            min_score=fineweb_min_edu_score,
+            filter_language=fineweb_language,
+            min_language_score=fineweb_min_lang_score,
+        )
+        return train_data, val_data, fineweb_edu_text_fn
     
     else:
         raise ValueError(f"Unknown dataset: {dataset}")
@@ -113,11 +133,16 @@ def decode_tokens(tokenizer, tokens):
 @app.command()
 def train(
     # Dataset selection
-    dataset: Annotated[DatasetChoice, typer.Option(help="Dataset to train on")] = DatasetChoice.finepdfs_edu,
+    dataset: Annotated[DatasetChoice, typer.Option(help="Dataset to train on")] = DatasetChoice.fineweb_edu,
     shuffle_buffer_size: Annotated[int, typer.Option(help="Shuffle buffer size for streaming datasets")] = 10_000,
-    # FinePDFs-Edu specific options
-    filter_english: Annotated[bool, typer.Option(help="Filter FinePDFs-Edu for majority English documents")] = True,
-    english_threshold: Annotated[float, typer.Option(help="Fraction of pages that must be English (0.0-1.0), docs with > threshold kept")] = 0.8,
+    # FinePDFs-Edu specific options (uses per-page language detection from PDF OCR)
+    finepdfs_filter_english: Annotated[bool, typer.Option(help="[finepdfs] Filter for majority English documents")] = True,
+    finepdfs_english_threshold: Annotated[float, typer.Option(help="[finepdfs] Fraction of pages that must be English (0.0-1.0)")] = 0.8,
+    # FineWeb-Edu specific options (uses language column from web crawl metadata)
+    fineweb_subset: Annotated[str, typer.Option(help="[fineweb] Subset: default, sample-10BT, sample-100BT, sample-350BT, CC-MAIN-*")] = "sample-10BT",
+    fineweb_min_edu_score: Annotated[float | None, typer.Option(help="[fineweb] Min educational score (higher=more educational)")] = None,
+    fineweb_language: Annotated[str | None, typer.Option(help="[fineweb] Filter by language column (e.g., 'en'), None to disable")] = "en",
+    fineweb_min_lang_score: Annotated[float | None, typer.Option(help="[fineweb] Min language detection confidence (0.0-1.0)")] = None,
     # Training hyperparameters
     num_tokens: Annotated[float, typer.Option(help="Total number of tokens to train on (in billions, e.g., 0.01 = 10M tokens)")] = 0.01,
     batch_size: Annotated[int, typer.Option(help="Batch size")] = 32,
@@ -162,8 +187,14 @@ def train(
         dataset,
         shuffle_buffer_size=shuffle_buffer_size,
         seed=seed,
-        filter_english=filter_english,
-        english_threshold=english_threshold,
+        # FinePDFs-Edu options
+        finepdfs_filter_english=finepdfs_filter_english,
+        finepdfs_english_threshold=finepdfs_english_threshold,
+        # FineWeb-Edu options
+        fineweb_subset=fineweb_subset,
+        fineweb_min_edu_score=fineweb_min_edu_score,
+        fineweb_language=fineweb_language,
+        fineweb_min_lang_score=fineweb_min_lang_score,
     )
 
     # Create streaming text datasets that tokenize on-the-fly
@@ -257,8 +288,14 @@ def train(
         config={
             "dataset": dataset.value,
             "shuffle_buffer_size": shuffle_buffer_size,
-            "filter_english": filter_english,
-            "english_threshold": english_threshold,
+            # FinePDFs-Edu config
+            "finepdfs_filter_english": finepdfs_filter_english,
+            "finepdfs_english_threshold": finepdfs_english_threshold,
+            # FineWeb-Edu config
+            "fineweb_subset": fineweb_subset,
+            "fineweb_min_edu_score": fineweb_min_edu_score,
+            "fineweb_language": fineweb_language,
+            "fineweb_min_lang_score": fineweb_min_lang_score,
             "seed": seed,
             "num_tokens": num_tokens_actual,
             "num_tokens_billions": num_tokens,
@@ -356,7 +393,7 @@ def train(
             model.eval()
 
             # Use a fixed prompt for generation
-            prompt_text = "The quick brown fox"
+            prompt_text = "An interesting fact about"
             prompt_tokens = tokenizer.encode(prompt_text)
             prompt = tokenizer.decode(prompt_tokens)
 
