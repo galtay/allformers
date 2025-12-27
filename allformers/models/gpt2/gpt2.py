@@ -713,18 +713,26 @@ class GPT2(nn.Module):
         max_new_tokens: int,
         temperature: float = 1.0,
         top_k: int | None = None,
+        eos_token_id: int | None = None,
     ) -> torch.Tensor:
         """Generate new tokens autoregressively.
 
         Args:
             input_ids: Starting token IDs of shape (batch, seq_len)
-            max_new_tokens: Number of new tokens to generate
+            max_new_tokens: Maximum number of new tokens to generate
             temperature: Sampling temperature (1.0 = neutral, <1 = sharper, >1 = flatter)
             top_k: If set, only sample from top k most likely tokens
+            eos_token_id: If set, stop generation when all sequences have generated this token
 
         Returns:
-            Generated token IDs of shape (batch, seq_len + max_new_tokens)
+            Generated token IDs of shape (batch, seq_len + num_generated)
+            where num_generated <= max_new_tokens
         """
+        batch_size = input_ids.shape[0]
+        
+        # Track which sequences have finished (generated EOS)
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
+        
         for _ in range(max_new_tokens):
             # Crop to context length if necessary
             input_ids_cond = input_ids
@@ -756,6 +764,12 @@ class GPT2(nn.Module):
 
             # Append to sequence
             input_ids = torch.cat([input_ids, next_token], dim=1)
+            
+            # Check for EOS token
+            if eos_token_id is not None:
+                finished = finished | (next_token.squeeze(-1) == eos_token_id)
+                if finished.all():
+                    break
 
         return input_ids
 

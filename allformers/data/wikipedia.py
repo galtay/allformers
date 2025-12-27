@@ -23,10 +23,20 @@ Example usage:
     dataset = load_wikipedia(config)
 """
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Optional, Union, Iterator
 
 from datasets import load_dataset, Dataset, IterableDataset
+
+
+def _deterministic_hash(value: str) -> int:
+    """Compute a deterministic hash of a string.
+    
+    Uses MD5 to ensure consistent results across Python processes
+    (unlike the built-in hash() which is randomized).
+    """
+    return int(hashlib.md5(value.encode()).hexdigest(), 16)
 
 
 # The wikimedia/wikipedia dataset on HuggingFace
@@ -53,6 +63,9 @@ class WikipediaConfig:
             Only works when streaming=False. For streaming, use split slicing instead.
         cache_dir: Directory to cache the downloaded dataset.
             If None, uses the default HuggingFace cache directory.
+        token: HuggingFace token for authentication. If None, uses the HF_TOKEN
+            environment variable or cached token. Set to increase rate limits
+            and download speeds.
     """
 
     subset: str = WIKIPEDIA_ENGLISH_SUBSET
@@ -60,6 +73,7 @@ class WikipediaConfig:
     streaming: bool = False
     num_samples: Optional[int] = None
     cache_dir: Optional[str] = None
+    token: Optional[str] = None
 
 
 def load_wikipedia(
@@ -113,6 +127,7 @@ def load_wikipedia(
         split=config.split,
         streaming=config.streaming,
         cache_dir=config.cache_dir,
+        token=config.token,
     )
 
     # If num_samples is specified and we're not streaming, select a subset
@@ -158,6 +173,28 @@ def iter_wikipedia_texts(
             yield article["text"]
 
 
+def wikipedia_text_fn(row: dict) -> str:
+    """Text extraction function for Wikipedia articles.
+    
+    This function is designed to be used with StreamingTextDataset
+    to extract formatted text from Wikipedia dataset rows.
+    
+    Args:
+        row: A row from the Wikipedia dataset with 'title' and 'text' fields.
+        
+    Returns:
+        Formatted text with title and content.
+        
+    Example:
+        >>> streaming_ds = StreamingTextDataset(
+        ...     dataset=wikipedia_data,
+        ...     tokenizer=tokenizer,
+        ...     text_fn=wikipedia_text_fn,
+        ... )
+    """
+    return f"{row['title']}\n\n{row['text']}"
+
+
 def get_wikipedia_sample(
     num_articles: int = 100,
     seed: int = 42,
@@ -189,70 +226,72 @@ def get_wikipedia_sample(
     return load_wikipedia(config)
 
 
-def load_wikipedia_train_val(
-    config: Optional[WikipediaConfig] = None,
-    val_fraction: float = 0.05,
-) -> tuple[Dataset, Dataset]:
-    """Load Wikipedia dataset split into training and validation sets.
+def load_wikipedia_streaming(
+    subset: str = WIKIPEDIA_ENGLISH_SUBSET,
+    shuffle_buffer_size: int = 10_000,
+    seed: int = 42,
+    cache_dir: Optional[str] = None,
+    token: Optional[str] = None,
+) -> tuple[IterableDataset, IterableDataset]:
+    """Load Wikipedia dataset as streaming IterableDatasets with shuffle buffers.
 
-    This function automatically handles the train/val split by reserving
-    a portion of the dataset for validation. Since the Wikipedia dataset
-    doesn't have a built-in validation split, we reserve the last portion
-    of the dataset for validation.
+    This is the recommended way to load Wikipedia for training. Uses HuggingFace's
+    streaming mode with shuffle buffers for memory-efficient random sampling.
+    
+    For train/val split, we use sharding: train gets shards 1-19, val gets shard 0.
+    This gives approximately 95%/5% split.
+    
+    See: https://huggingface.co/docs/datasets/main/stream#shuffle
 
     Args:
-        config: Configuration for loading the dataset. If None, uses defaults.
-            Note: The split in config will be ignored - this function handles
-            the split internally.
-        val_fraction: Fraction of dataset to reserve for validation (default: 0.05 = 5%).
+        subset: The Wikipedia language/date subset to load.
+            Default is "20231101.en" for English Wikipedia.
+        shuffle_buffer_size: Size of the shuffle buffer for randomization.
+            Larger buffers give better randomization but use more memory.
+            Default is 10,000.
+        seed: Random seed for shuffling reproducibility.
+        cache_dir: Directory to cache the downloaded dataset.
+        token: HuggingFace token for authentication. If None, uses the HF_TOKEN
+            environment variable or cached token.
 
     Returns:
-        Tuple of (train_dataset, val_dataset) HuggingFace datasets.
+        Tuple of (train_dataset, val_dataset) as shuffled IterableDatasets.
 
     Example:
-        >>> train_data, val_data = load_wikipedia_train_val()
-        >>> print(f"Train: {len(train_data):,}, Val: {len(val_data):,}")
+        >>> train_data, val_data = load_wikipedia_streaming(seed=42)
+        >>> for article in train_data:
+        ...     print(article["title"])
+        ...     break
     """
-    if config is None:
-        config = WikipediaConfig()
-
-    # Load full dataset to determine size
-    full_config = WikipediaConfig(
-        subset=config.subset,
+    # Load dataset in streaming mode
+    dataset = load_dataset(
+        WIKIPEDIA_DATASET_PATH,
+        name=subset,
         split="train",
-        streaming=False,  # Need to know length, so can't use streaming
-        cache_dir=config.cache_dir,
+        streaming=True,
+        cache_dir=cache_dir,
+        token=token,
     )
-    full_dataset = load_wikipedia(full_config)
-    full_size = len(full_dataset)
-
-    # Calculate train/val split
-    val_size = max(1, int(full_size * val_fraction))
-    train_size = full_size - val_size
-
-    # Load training split (first portion)
-    # Note: We use streaming=False for splits since we need to slice the dataset
-    # The actual streaming happens in StreamingTextDataset during training
-    train_config = WikipediaConfig(
-        subset=config.subset,
-        split=f"train[:{train_size}]",
-        streaming=False,
-        cache_dir=config.cache_dir,
-    )
-    train_dataset = load_wikipedia(train_config)
-
-    # Load validation split (last portion)
-    val_config = WikipediaConfig(
-        subset=config.subset,
-        split=f"train[-{val_size}:]",
-        streaming=False,
-        cache_dir=config.cache_dir,
-    )
-    val_dataset = load_wikipedia(val_config)
     
-    print(f"Loaded Wikipedia dataset:")
-    print(f"  Training articles: {len(train_dataset):,} ({train_size/full_size*100:.1f}%)")
-    print(f"  Validation articles: {len(val_dataset):,} ({val_size/full_size*100:.1f}%)")
+    # Use filter to create train/val split based on deterministic hash of id
+    # This gives a deterministic ~95%/5% split that's consistent across runs
+    def is_train(example):
+        return _deterministic_hash(example["id"]) % 20 != 0  # 19/20 = 95% for training
+    
+    def is_val(example):
+        return _deterministic_hash(example["id"]) % 20 == 0  # 1/20 = 5% for validation
+    
+    train_dataset = dataset.filter(is_train)
+    val_dataset = dataset.filter(is_val)
+    
+    # Apply shuffle buffers
+    # Training uses the provided seed, validation uses a different seed
+    train_dataset = train_dataset.shuffle(seed=seed, buffer_size=shuffle_buffer_size)
+    val_dataset = val_dataset.shuffle(seed=seed + 1, buffer_size=shuffle_buffer_size)
+    
+    print(f"Loaded Wikipedia dataset (streaming mode):")
+    print(f"  Training: ~95% of articles (shuffle buffer: {shuffle_buffer_size:,})")
+    print(f"  Validation: ~5% of articles")
 
     return train_dataset, val_dataset
 

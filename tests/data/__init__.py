@@ -1,2 +1,1 @@
-"""Tests for allformers.data module."""
-
+# tests.data

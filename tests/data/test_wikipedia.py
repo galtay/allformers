@@ -4,7 +4,7 @@ Tests for allformers.data.wikipedia module.
 
 import pytest
 
-from allformers.data import (
+from allformers.data.wikipedia import (
     load_wikipedia,
     WikipediaConfig,
     WIKIPEDIA_DATASET_PATH,
