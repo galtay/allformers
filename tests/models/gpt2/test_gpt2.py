@@ -117,9 +117,9 @@ class TestGPT2Config:
         config = GPT2Config(embedding_dim=1024, mlp_ratio=4)
         assert config.mlp_hidden_dim == 4096
 
-    def test_gpt2_small_preset(self):
-        """Test GPT-2 Small preset configuration."""
-        config = GPT2Config.gpt2_small()
+    def test_gpt2_preset(self):
+        """Test GPT-2 (base) preset configuration."""
+        config = GPT2Config.gpt2()
 
         assert config.embedding_dim == 768
         assert config.num_heads == 12
@@ -355,9 +355,8 @@ class TestMLP:
 
     def test_bias_configuration(self):
         """Test that bias is configured correctly."""
-        # With bias
+        # With bias (tiny() already has bias=True by default)
         config_with_bias = GPT2Config.tiny()
-        config_with_bias.bias = True
         mlp_with_bias = MLP(config_with_bias)
 
         assert mlp_with_bias.fc1.bias is not None
@@ -858,7 +857,7 @@ class TestGPT2FromPretrained:
 
     def test_invalid_model_type(self):
         """Test that invalid model types raise an error."""
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             GPT2.from_pretrained("invalid-model")
 
     def test_valid_model_types_accepted(self):
