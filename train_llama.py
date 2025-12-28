@@ -252,8 +252,10 @@ def train(
     print(f"  Cached {len(cached_val_batches)} batches ({len(cached_val_batches) * batch_size * seq_len:,} tokens)")
 
     # Create model
+    # Note: Use len(tokenizer) not tokenizer.vocab_size because
+    # Llama tokenizers have added special tokens beyond the base vocab
     config = LlamaConfig(
-        vocab_size=tokenizer.vocab_size,
+        vocab_size=len(tokenizer),
         context_length=seq_len,
         embedding_dim=embedding_dim,
         num_heads=num_heads,
