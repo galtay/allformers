@@ -167,7 +167,7 @@ def train(
     num_kv_heads: Annotated[int | None, typer.Option(help="Number of KV heads for GQA (None = same as num_heads)")] = None,
     num_layers: Annotated[int, typer.Option(help="Number of transformer layers")] = 12,
     intermediate_size: Annotated[int | None, typer.Option(help="MLP intermediate size (None = 4 * embedding_dim)")] = None,
-    dropout: Annotated[float, typer.Option(help="Dropout rate")] = 0.1,
+    dropout: Annotated[float, typer.Option(help="Dropout rate")] = 0.0,
     rope_theta: Annotated[float, typer.Option(help="RoPE base frequency")] = 10000.0,
     # Tokenizer settings
     tokenizer_name: Annotated[str, typer.Option(help="HuggingFace tokenizer to use")] = "meta-llama/Llama-3.2-1B",
