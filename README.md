@@ -36,10 +36,11 @@ allformers/
 | Model | Status | Description |
 |-------|--------|-------------|
 | [GPT-2](allformers/models/gpt2/) | ✅ | OpenAI's GPT-2 language model |
+| [Llama](allformers/models/llama/) | ✅ | Meta's Llama 3.2 with RoPE, GQA, and SwiGLU |
 
 ## HuggingFace Authentication
 
-For faster downloads and higher rate limits when accessing HuggingFace datasets and models, set your HuggingFace token:
+A HuggingFace token is **required** for accessing gated models like Llama, and recommended for faster downloads:
 
 ```bash
 # Set for current session
@@ -50,6 +51,8 @@ echo 'export HF_TOKEN=your_token_here' >> ~/.bashrc
 ```
 
 You can get a token from [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
+
+**Note**: For Llama models, you must also accept the license at [meta-llama/Llama-3.2-1B](https://huggingface.co/meta-llama/Llama-3.2-1B).
 
 ## Running Tests
 
