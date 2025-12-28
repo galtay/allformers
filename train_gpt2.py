@@ -23,7 +23,8 @@ from typing import Annotated
 import tqdm
 import torch
 import torch.optim as optim
-from torch.amp import autocast, GradScaler
+from torch.amp.autocast_mode import autocast
+from torch.amp.grad_scaler import GradScaler
 from torch.utils.data import DataLoader
 import typer
 import wandb
@@ -147,8 +148,11 @@ def train(
     num_tokens: Annotated[float, typer.Option(help="Total number of tokens to train on (in billions, e.g., 0.01 = 10M tokens)")] = 0.01,
     batch_size: Annotated[int, typer.Option(help="Batch size")] = 32,
     gradient_accumulate: Annotated[int, typer.Option(help="Gradient accumulation steps")] = 1,
-    learning_rate: Annotated[float, typer.Option(help="Learning rate")] = 3e-4,
-    seq_len: Annotated[int, typer.Option(help="Sequence length")] = 512,
+    learning_rate: Annotated[float, typer.Option(help="Peak learning rate")] = 3e-4,
+    warmup_ratio: Annotated[float, typer.Option(help="Fraction of training for LR warmup")] = 0.05,
+    cooldown_ratio: Annotated[float, typer.Option(help="Fraction of training for LR cooldown")] = 0.5,
+    min_learning_rate_frac: Annotated[float, typer.Option(help="Min LR as fraction of peak LR (e.g., 0.1 = 10%)")] = 0.1,
+    seq_len: Annotated[int, typer.Option(help="Sequence length")] = 1024,
     # Performance optimizations
     use_amp: Annotated[bool, typer.Option(help="Use mixed precision training (AMP)")] = True,
     use_compile: Annotated[bool, typer.Option(help="Use torch.compile for model optimization")] = True,
@@ -158,9 +162,9 @@ def train(
     generate_every: Annotated[int, typer.Option(help="Generate samples every N batches")] = 500,
     generate_length: Annotated[int, typer.Option(help="Length of generated samples")] = 256,
     # Model settings (GPT-2 specific)
-    embedding_dim: Annotated[int, typer.Option(help="Model embedding dimension")] = 512,
-    num_heads: Annotated[int, typer.Option(help="Number of attention heads")] = 8,
-    num_layers: Annotated[int, typer.Option(help="Number of transformer layers")] = 6,
+    embedding_dim: Annotated[int, typer.Option(help="Model embedding dimension")] = 768,
+    num_heads: Annotated[int, typer.Option(help="Number of attention heads")] = 12,
+    num_layers: Annotated[int, typer.Option(help="Number of transformer layers")] = 12,
     dropout: Annotated[float, typer.Option(help="Dropout rate")] = 0.1,
     # Wandb settings
     wandb_project: Annotated[str, typer.Option(help="Wandb project name")] = "allformers-gpt2",
@@ -252,7 +256,7 @@ def train(
     if use_compile and device == "cuda" and hasattr(torch, "compile"):
         print("Compiling model with torch.compile...")
         # Use 'default' mode instead of 'reduce-overhead' to avoid CUDA graph issues
-        model = torch.compile(model, mode="default")
+        model = torch.compile(model, mode="default")  # type: ignore[assignment]
         print("Model compiled successfully!")
 
     # Calculate number of optimizer steps from num_tokens
@@ -275,13 +279,45 @@ def train(
     # Optimizer
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
 
+    # Learning rate scheduler with warmup, constant, and cooldown phases
+    warmup_steps = round(warmup_ratio * num_steps)
+    cooldown_steps = round(cooldown_ratio * num_steps)
+    
+    def get_lr_multiplier(step: int) -> float:
+        """Get LR multiplier for the current step.
+        
+        - Warmup: linear increase from min_learning_rate_frac to 1.0
+        - Constant: stays at 1.0
+        - Cooldown: linear decrease from 1.0 to min_learning_rate_frac
+        """
+        if step < warmup_steps:
+            # Linear warmup from min_learning_rate_frac to 1.0
+            progress = (step + 1) / warmup_steps
+            return min_learning_rate_frac + progress * (1.0 - min_learning_rate_frac)
+        elif step <= num_steps - cooldown_steps:
+            # Constant phase at peak LR
+            return 1.0
+        else:
+            # Linear cooldown from 1.0 to min_learning_rate_frac
+            progress = (num_steps - step) / cooldown_steps
+            return progress * 1.0 + (1 - progress) * min_learning_rate_frac
+    
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=get_lr_multiplier)
+    
+    print(f"Learning rate schedule:")
+    print(f"  Warmup steps: {warmup_steps:,} ({warmup_ratio*100:.1f}%)")
+    print(f"  Cooldown steps: {cooldown_steps:,} ({cooldown_ratio*100:.1f}%)")
+    print(f"  Constant steps: {num_steps - warmup_steps - cooldown_steps:,}")
+    print(f"  Peak LR: {learning_rate:.2e}")
+    print(f"  Min LR: {learning_rate * min_learning_rate_frac:.2e} ({min_learning_rate_frac*100:.1f}% of peak)")
+
     # Mixed precision training scaler
     scaler = GradScaler(device=device) if use_amp and device == "cuda" else None
     if scaler:
         print("Mixed precision training (AMP) enabled")
 
     # Initialize wandb
-    wandb.init(
+    wandb.init(  # type: ignore[attr-defined]
         project=wandb_project,
         name=wandb_run_name,
         mode="online" if track_online else "offline",
@@ -304,6 +340,11 @@ def train(
             "batch_size": batch_size,
             "gradient_accumulate": gradient_accumulate,
             "learning_rate": learning_rate,
+            "warmup_ratio": warmup_ratio,
+            "cooldown_ratio": cooldown_ratio,
+            "min_learning_rate_frac": min_learning_rate_frac,
+            "warmup_steps": warmup_steps,
+            "cooldown_steps": cooldown_steps,
             "use_amp": use_amp and device == "cuda",
             "use_compile": use_compile and device == "cuda",
             "seq_len": seq_len,
@@ -359,13 +400,17 @@ def train(
         else:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+        
+        # Step the learning rate scheduler
+        scheduler.step()
+        current_lr = scheduler.get_last_lr()[0]
 
         tokens_seen += tokens_per_step
 
-        wandb.log({"train_loss": accumulated_loss, "step": step, "tokens_seen": tokens_seen})
-        metrics_history.append({"step": step, "train_loss": accumulated_loss, "tokens_seen": tokens_seen})
+        wandb.log({"train_loss": accumulated_loss, "lr": current_lr, "step": step, "tokens_seen": tokens_seen})  # type: ignore[attr-defined]
+        metrics_history.append({"step": step, "train_loss": accumulated_loss, "lr": current_lr, "tokens_seen": tokens_seen})
         if step % 10 == 0:
-            tqdm.tqdm.write(f"step {step:5d} | train loss: {accumulated_loss:.4f} | tokens: {tokens_seen:,}")
+            tqdm.tqdm.write(f"step {step:5d} | train loss: {accumulated_loss:.4f} | lr: {current_lr:.2e} | tokens: {tokens_seen:,}")
 
         # Validation (uses cached batches for consistent comparison across training)
         if step % validate_every == 0:
@@ -384,7 +429,7 @@ def train(
                     total_val_loss += val_loss.item()
 
             avg_val_loss = total_val_loss / len(cached_val_batches)
-            wandb.log({"val_loss": avg_val_loss, "step": step, "tokens_seen": tokens_seen})
+            wandb.log({"val_loss": avg_val_loss, "step": step, "tokens_seen": tokens_seen})  # type: ignore[attr-defined]
             metrics_history.append({"step": step, "val_loss": avg_val_loss, "tokens_seen": tokens_seen})
             tqdm.tqdm.write(f"step {step:5d} | val loss: {avg_val_loss:.4f} (avg of {len(cached_val_batches)} batches)")
 
@@ -420,7 +465,7 @@ def train(
         json.dump(metrics_history, f, indent=2)
     print(f"\nMetrics saved to {metrics_file}")
 
-    wandb.finish()
+    wandb.finish()  # type: ignore[attr-defined]
     print("Training complete!")
 
 

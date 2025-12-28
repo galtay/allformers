@@ -35,3 +35,11 @@ module-root = ""
 markers = [
     "slow: marks tests as slow (downloads from internet)",
 ]
+
+[tool.pyright]
+# Use basic type checking mode (less strict than default)
+typeCheckingMode = "basic"
+# Ignore missing type stubs for third-party packages
+reportMissingTypeStubs = false
+reportMissingModuleSource = false
+reportMissingImports = false
