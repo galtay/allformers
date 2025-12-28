@@ -30,12 +30,15 @@ References:
 """
 
 import math
-from dataclasses import dataclass
 
+from typing import Self, cast
+
+from pydantic import BaseModel, ConfigDict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, einsum
+from transformers import GPT2LMHeadModel
 
 
 # =============================================================================
@@ -43,8 +46,7 @@ from einops import rearrange, einsum
 # =============================================================================
 
 
-@dataclass
-class GPT2Config:
+class GPT2Config(BaseModel):
     """Configuration for GPT-2 model.
 
     Attributes:
@@ -71,6 +73,8 @@ class GPT2Config:
     bias: bool = True
     scale_residual_init: bool = False
 
+    model_config = ConfigDict(frozen=True)  # Make immutable like a frozen dataclass
+
     @property
     def head_dim(self) -> int:
         """Dimension of each attention head."""
@@ -86,8 +90,8 @@ class GPT2Config:
         return self.embedding_dim * self.mlp_ratio
 
     @classmethod
-    def gpt2_small(cls) -> "GPT2Config":
-        """GPT-2 Small (124M parameters)."""
+    def gpt2(cls) -> Self:
+        """GPT-2 (124M parameters). Matches HuggingFace 'gpt2'."""
         return cls(
             embedding_dim=768,
             num_heads=12,
@@ -95,8 +99,8 @@ class GPT2Config:
         )
 
     @classmethod
-    def gpt2_medium(cls) -> "GPT2Config":
-        """GPT-2 Medium (355M parameters)."""
+    def gpt2_medium(cls) -> Self:
+        """GPT-2 Medium (355M parameters). Matches HuggingFace 'gpt2-medium'."""
         return cls(
             embedding_dim=1024,
             num_heads=16,
@@ -104,8 +108,8 @@ class GPT2Config:
         )
 
     @classmethod
-    def gpt2_large(cls) -> "GPT2Config":
-        """GPT-2 Large (774M parameters)."""
+    def gpt2_large(cls) -> Self:
+        """GPT-2 Large (774M parameters). Matches HuggingFace 'gpt2-large'."""
         return cls(
             embedding_dim=1280,
             num_heads=20,
@@ -113,8 +117,8 @@ class GPT2Config:
         )
 
     @classmethod
-    def gpt2_xl(cls) -> "GPT2Config":
-        """GPT-2 XL (1.5B parameters)."""
+    def gpt2_xl(cls) -> Self:
+        """GPT-2 XL (1.5B parameters). Matches HuggingFace 'gpt2-xl'."""
         return cls(
             embedding_dim=1600,
             num_heads=25,
@@ -122,7 +126,7 @@ class GPT2Config:
         )
 
     @classmethod
-    def tiny(cls) -> "GPT2Config":
+    def tiny(cls) -> Self:
         """A tiny model for testing and debugging."""
         return cls(
             vocab_size=1000,
@@ -131,6 +135,42 @@ class GPT2Config:
             num_heads=4,
             num_layers=2,
             dropout=0.0,
+        )
+
+    @classmethod
+    def for_pretrained(cls, model_name: str) -> Self:
+        """Get config for a pretrained HuggingFace model.
+
+        Args:
+            model_name: One of 'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'
+
+        Returns:
+            GPT2Config with settings matching the pretrained checkpoint
+        """
+        # Map HuggingFace model names (with hyphens) to class methods (with underscores)
+        config_methods = {
+            "gpt2": cls.gpt2,
+            "gpt2-medium": cls.gpt2_medium,
+            "gpt2-large": cls.gpt2_large,
+            "gpt2-xl": cls.gpt2_xl,
+        }
+
+        if model_name not in config_methods:
+            valid = ", ".join(config_methods.keys())
+            raise ValueError(f"Unknown model: {model_name}. Choose from: {valid}")
+
+        # Get base config and override with pretrained-specific settings
+        base_config = config_methods[model_name]()
+        return cls(
+            vocab_size=50257,  # GPT-2 BPE tokenizer
+            context_length=1024,
+            embedding_dim=base_config.embedding_dim,
+            num_heads=base_config.num_heads,
+            num_layers=base_config.num_layers,
+            mlp_ratio=base_config.mlp_ratio,
+            dropout=0.0,  # No dropout for inference
+            bias=True,
+            scale_residual_init=False,  # Loading pretrained weights
         )
 
 
@@ -167,6 +207,9 @@ class CausalSelfAttention(nn.Module):
     Args:
         config: GPT2Config with model hyperparameters
     """
+
+    # Type annotation for buffer registered conditionally
+    causal_mask: torch.Tensor
 
     def __init__(self, config: GPT2Config):
         super().__init__()
@@ -448,7 +491,7 @@ class TransformerBlock(nn.Module):
 # =============================================================================
 
 
-def copy_weights_from_hf(model: "GPT2", hf_model: "GPT2LMHeadModel") -> None:
+def copy_weights_from_hf(model: "GPT2", hf_model: GPT2LMHeadModel) -> None:
     """Copy weights from a HuggingFace GPT-2 model to our implementation.
 
     This function maps HuggingFace's parameter names to our parameter names
@@ -473,8 +516,6 @@ def copy_weights_from_hf(model: "GPT2", hf_model: "GPT2LMHeadModel") -> None:
         model: Our GPT2 model to copy weights into
         hf_model: HuggingFace GPT2LMHeadModel to copy weights from
     """
-    from transformers import GPT2LMHeadModel
-
     hf_state = hf_model.state_dict()
 
     with torch.no_grad():
@@ -483,7 +524,7 @@ def copy_weights_from_hf(model: "GPT2", hf_model: "GPT2LMHeadModel") -> None:
         model.position_embedding.weight.copy_(hf_state["transformer.wpe.weight"])
 
         # Transformer blocks
-        for i, block in enumerate(model.blocks):
+        for i, block in enumerate(cast(list[TransformerBlock], model.blocks)):
             # Layer norm 1 (before attention)
             block.ln1.weight.copy_(hf_state[f"transformer.h.{i}.ln_1.weight"])
             block.ln1.bias.copy_(hf_state[f"transformer.h.{i}.ln_1.bias"])
@@ -786,47 +827,25 @@ class GPT2(nn.Module):
         return n_params
 
     @classmethod
-    def from_pretrained(cls, model_type: str) -> "GPT2":
+    def from_pretrained(cls, model_name: str) -> Self:
         """Load a pretrained GPT-2 model from HuggingFace.
 
         Args:
-            model_type: One of 'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'
+            model_name: One of 'gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'
 
         Returns:
             GPT2 model with pretrained weights loaded
         """
-        assert model_type in {"gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"}, (
-            f"Unknown model type: {model_type}. "
-            f"Choose from: gpt2, gpt2-medium, gpt2-large, gpt2-xl"
-        )
+        print(f"Loading pretrained weights from HuggingFace: {model_name}")
 
-        from transformers import GPT2LMHeadModel
-
-        print(f"Loading pretrained weights from HuggingFace: {model_type}")
-
-        # Model configurations from OpenAI
-        config_args = {
-            "gpt2": dict(embedding_dim=768, num_heads=12, num_layers=12),
-            "gpt2-medium": dict(embedding_dim=1024, num_heads=16, num_layers=24),
-            "gpt2-large": dict(embedding_dim=1280, num_heads=20, num_layers=36),
-            "gpt2-xl": dict(embedding_dim=1600, num_heads=25, num_layers=48),
-        }[model_type]
-
-        # GPT-2 checkpoints always use these settings
-        config_args["vocab_size"] = 50257
-        config_args["context_length"] = 1024
-        config_args["bias"] = True
-        config_args["dropout"] = 0.0  # No dropout for inference
-        config_args["scale_residual_init"] = False  # We're loading pretrained weights
-
-        # Create our model
-        config = GPT2Config(**config_args)
+        # Create our model with the matching config
+        config = GPT2Config.for_pretrained(model_name)
         model = cls(config)
 
         # Load HuggingFace model and copy weights
-        hf_model = GPT2LMHeadModel.from_pretrained(model_type)
+        hf_model = GPT2LMHeadModel.from_pretrained(model_name)
         copy_weights_from_hf(model, hf_model)
 
-        print(f"Successfully loaded {model_type} weights")
+        print(f"Successfully loaded {model_name} weights")
         return model
 

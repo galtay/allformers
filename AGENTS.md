@@ -91,6 +91,56 @@ from allformers.data.wikipedia import load_wikipedia  # Full path
 
 Do not put module docstrings in `__init__.py` files. Instead, create a `README.md` in the directory if documentation is needed.
 
+### No Deferred or Conditional Imports
+
+Do not use deferred imports (inside functions) or conditional imports (`if TYPE_CHECKING`) for dependencies that are actually used at runtime. Keep imports simple and at the top level.
+
+**Bad:**
+```python
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers import GPT2LMHeadModel
+
+def load_model(hf_model: "GPT2LMHeadModel") -> None:
+    from transformers import GPT2LMHeadModel  # Deferred import
+    ...
+```
+
+**Good:**
+```python
+from transformers import GPT2LMHeadModel
+
+def load_model(hf_model: GPT2LMHeadModel) -> None:
+    ...
+```
+
+## Type Annotations
+
+### Use `Self` for Class Method Return Types
+
+When a class method returns an instance of the class, use `Self` from the `typing` module instead of quoting the class name:
+
+**Bad:**
+```python
+class MyConfig:
+    @classmethod
+    def default(cls) -> "MyConfig":
+        return cls()
+```
+
+**Good:**
+```python
+from typing import Self
+
+class MyConfig:
+    @classmethod
+    def default(cls) -> Self:
+        return cls()
+```
+
+This is cleaner and works correctly with subclasses.
+
 ## HuggingFace Datasets
 
 When working with HuggingFace streaming datasets, be aware of resource cleanup issues that can cause tests to hang.

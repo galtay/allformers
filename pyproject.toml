@@ -17,6 +17,7 @@ dependencies = [
     "wandb>=0.23.1",
     "typer>=0.20.1",
     "matplotlib>=3.10.8",
+    "pydantic>=2.11.0",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +38,7 @@ markers = [
 ]
 
 [tool.pyright]
+pythonVersion = "3.13"
 # Use basic type checking mode (less strict than default)
 typeCheckingMode = "basic"
 # Ignore missing type stubs for third-party packages
