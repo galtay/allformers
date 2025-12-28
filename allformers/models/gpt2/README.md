@@ -12,7 +12,7 @@ config = GPT2Config.tiny()
 model = GPT2(config)
 
 # Or use standard GPT-2 sizes
-config = GPT2Config.gpt2_small()   # 124M params
+config = GPT2Config.gpt2()        # 124M params
 config = GPT2Config.gpt2_medium()  # 355M params
 config = GPT2Config.gpt2_large()   # 774M params
 config = GPT2Config.gpt2_xl()      # 1.5B params
@@ -59,7 +59,7 @@ scores = einsum(
 
 | Config | Layers | Heads | Embedding Dim | Parameters |
 |--------|--------|-------|---------------|------------|
-| `gpt2_small()` | 12 | 12 | 768 | 124M |
+| `gpt2()` | 12 | 12 | 768 | 124M |
 | `gpt2_medium()` | 24 | 16 | 1024 | 355M |
 | `gpt2_large()` | 36 | 20 | 1280 | 774M |
 | `gpt2_xl()` | 48 | 25 | 1600 | 1.5B |
