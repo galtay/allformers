@@ -6,11 +6,15 @@ avoiding the need to load entire tokenized datasets into memory.
 
 Uses HuggingFace IterableDataset with shuffle buffers for randomization.
 See: https://huggingface.co/docs/datasets/main/stream#shuffle
+
+For DDP (Distributed Data Parallel) training, use the rank and world_size
+parameters to shard the dataset across workers.
 """
 
-from typing import Callable
+from typing import Callable, Optional
 
 import torch
+from datasets.distributed import split_dataset_by_node
 from torch.utils.data import IterableDataset
 
 
@@ -27,6 +31,7 @@ class StreamingTextDataset(IterableDataset):
     - Lower memory usage (no need to store all tokens)
     - Faster startup (no upfront tokenization or download)
     - Uses HuggingFace's built-in shuffle buffer for randomization
+    - Supports DDP training via rank/world_size sharding
     
     Note: Use num_workers=0 with DataLoader when using HuggingFace datasets
     to avoid pickling issues.
@@ -42,6 +47,11 @@ class StreamingTextDataset(IterableDataset):
             dict and return a string. Each dataset module provides its own:
             - Wikipedia: use wikipedia_text_fn from allformers.data.wikipedia
             - FinePDFs-Edu: use finepdfs_edu_text_fn from allformers.data.finepdfs_edu
+        rank: The rank of the current process in DDP training (0 to world_size-1).
+            If provided along with world_size, the dataset will be sharded so each
+            worker processes a unique subset of the data. Default: None (no sharding).
+        world_size: Total number of processes in DDP training. Must be provided
+            together with rank. Default: None (no sharding).
     
     Yields:
         torch.Tensor of shape (seq_len + 1,) containing token IDs.
@@ -64,6 +74,21 @@ class StreamingTextDataset(IterableDataset):
         >>> loader = DataLoader(train_dataset, batch_size=4, num_workers=0)
         >>> batch = next(iter(loader))
         >>> input_ids, targets = batch[:, :-1], batch[:, 1:]
+    
+    DDP Example:
+        >>> # In each DDP process:
+        >>> rank = torch.distributed.get_rank()
+        >>> world_size = torch.distributed.get_world_size()
+        >>> 
+        >>> train_dataset = StreamingTextDataset(
+        ...     dataset=train_data,
+        ...     tokenizer=tokenizer,
+        ...     seq_len=512,
+        ...     text_fn=wikipedia_text_fn,
+        ...     rank=rank,
+        ...     world_size=world_size,
+        ... )
+        >>> # Each worker automatically gets a unique shard of the data
     """
     
     def __init__(
@@ -71,7 +96,9 @@ class StreamingTextDataset(IterableDataset):
         dataset,
         tokenizer,
         seq_len: int = 512,
-        text_fn: Callable[[dict], str] = None,
+        text_fn: Optional[Callable[[dict], str]] = None,
+        rank: Optional[int] = None,
+        world_size: Optional[int] = None,
     ):
         if text_fn is None:
             raise ValueError(
@@ -79,10 +106,33 @@ class StreamingTextDataset(IterableDataset):
                 "  - Wikipedia: wikipedia_text_fn from allformers.data.wikipedia\n"
                 "  - FinePDFs-Edu: finepdfs_edu_text_fn from allformers.data.finepdfs_edu"
             )
+        
+        # Validate rank/world_size consistency
+        if (rank is None) != (world_size is None):
+            raise ValueError(
+                "rank and world_size must both be provided or both be None. "
+                f"Got rank={rank}, world_size={world_size}"
+            )
+        
+        # Apply sharding for DDP if rank/world_size are provided
+        if rank is not None and world_size is not None:
+            if not (0 <= rank < world_size):
+                raise ValueError(
+                    f"rank must be in [0, world_size), got rank={rank}, world_size={world_size}"
+                )
+            dataset = split_dataset_by_node(dataset, rank=rank, world_size=world_size)
+        
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.seq_len = seq_len
         self.text_fn = text_fn
+        self.rank = rank
+        self.world_size = world_size
+        
+        # Disable tokenizer warning about sequence length - we handle chunking ourselves
+        # This prevents: "Token indices sequence length is longer than the specified 
+        # maximum sequence length for this model (N > 1024)"
+        self.tokenizer.model_max_length = 10**12
         
         # Check if tokenizer adds EOS automatically
         test_tokens = tokenizer.encode("test")

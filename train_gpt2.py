@@ -7,14 +7,18 @@ inspired by https://github.com/lucidrains/x-transformers/blob/main/train_enwik8.
 Uses HuggingFace streaming datasets with shuffle buffers for memory-efficient
 training on large datasets. See: https://huggingface.co/docs/datasets/main/stream
 
+Supports DDP (Distributed Data Parallel) training for multi-GPU setups.
+
 Usage:
-    uv run python train_gpt2.py --help
+    # Single GPU
     uv run python train_gpt2.py --dataset wikipedia --num-tokens 0.1
-    uv run python train_gpt2.py --dataset finepdfs-edu --num-tokens 0.1
-    uv run python train_gpt2.py --dataset fineweb-edu --num-tokens 0.1
+    
+    # Multi-GPU with DDP (e.g., 4 GPUs)
+    uv run torchrun --nproc_per_node=4 train_gpt2.py --dataset wikipedia --num-tokens 0.1
 """
 
 import json
+import os
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -22,9 +26,11 @@ from typing import Annotated
 
 import tqdm
 import torch
+import torch.distributed as dist
 import torch.optim as optim
 from torch.amp.autocast_mode import autocast
 from torch.amp.grad_scaler import GradScaler
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 import typer
 import wandb
@@ -127,6 +133,106 @@ def decode_tokens(tokenizer, tokens):
 
 
 # =============================================================================
+# DDP (Distributed Data Parallel) Helpers
+# =============================================================================
+
+
+def is_ddp() -> bool:
+    """Check if we're running in DDP mode."""
+    return dist.is_initialized()
+
+
+def get_rank() -> int:
+    """Get the rank of the current process (0 if not in DDP mode)."""
+    return dist.get_rank() if is_ddp() else 0
+
+
+def get_world_size() -> int:
+    """Get the total number of processes (1 if not in DDP mode)."""
+    return dist.get_world_size() if is_ddp() else 1
+
+
+def is_main_process() -> bool:
+    """Check if this is the main process (rank 0)."""
+    return get_rank() == 0
+
+
+def setup_ddp():
+    """Initialize DDP if running with torchrun/distributed launch.
+    
+    Returns:
+        Tuple of (rank, world_size, local_rank, device)
+    """
+    # Check if we're running in distributed mode
+    # torchrun sets these environment variables
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        
+        # Initialize process group
+        dist.init_process_group(backend="nccl")
+        
+        # Set device for this process
+        torch.cuda.set_device(local_rank)
+        device = f"cuda:{local_rank}"
+        
+        if rank == 0:
+            print(f"DDP initialized: rank {rank}/{world_size}, local_rank {local_rank}")
+        
+        return rank, world_size, local_rank, device
+    else:
+        # Single process mode
+        device = get_device()
+        return 0, 1, 0, device
+
+
+def cleanup_ddp():
+    """Clean up DDP resources."""
+    if is_ddp():
+        dist.destroy_process_group()
+
+
+def set_seed(seed: int, deterministic: bool = False):
+    """Set random seeds for reproducibility.
+    
+    Sets seeds for:
+    - Python's random module
+    - NumPy (if available)
+    - PyTorch CPU
+    - PyTorch CUDA (all devices)
+    
+    Args:
+        seed: Random seed value
+        deterministic: If True, enables deterministic algorithms which may
+            impact performance but ensures fully reproducible results.
+    """
+    import random
+    random.seed(seed)
+    
+    # NumPy (optional, but good to have)
+    try:
+        import numpy as np
+        np.random.seed(seed)
+    except ImportError:
+        pass
+    
+    # PyTorch
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)  # For multi-GPU
+    
+    # Optionally enable deterministic algorithms (may impact performance)
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    else:
+        # Allow cuDNN to auto-tune for best performance
+        torch.backends.cudnn.benchmark = True
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -140,13 +246,13 @@ def train(
     finepdfs_filter_english: Annotated[bool, typer.Option(help="[finepdfs] Filter for majority English documents")] = True,
     finepdfs_english_threshold: Annotated[float, typer.Option(help="[finepdfs] Fraction of pages that must be English (0.0-1.0)")] = 0.8,
     # FineWeb-Edu specific options (uses language column from web crawl metadata)
-    fineweb_subset: Annotated[str, typer.Option(help="[fineweb] Subset: default, sample-10BT, sample-100BT, sample-350BT, CC-MAIN-*")] = "sample-10BT",
+    fineweb_subset: Annotated[str, typer.Option(help="[fineweb] Subset: default, sample-10BT, sample-100BT, sample-350BT, CC-MAIN-*")] = "default",
     fineweb_min_edu_score: Annotated[float | None, typer.Option(help="[fineweb] Min educational score (higher=more educational)")] = None,
     fineweb_language: Annotated[str | None, typer.Option(help="[fineweb] Filter by language column (e.g., 'en'), None to disable")] = "en",
     fineweb_min_lang_score: Annotated[float | None, typer.Option(help="[fineweb] Min language detection confidence (0.0-1.0)")] = None,
     # Training hyperparameters
     num_tokens: Annotated[float, typer.Option(help="Total number of tokens to train on (in billions, e.g., 0.01 = 10M tokens)")] = 0.01,
-    batch_size: Annotated[int, typer.Option(help="Batch size")] = 32,
+    batch_size: Annotated[int, typer.Option(help="Batch size per GPU")] = 32,
     gradient_accumulate: Annotated[int, typer.Option(help="Gradient accumulation steps")] = 1,
     learning_rate: Annotated[float, typer.Option(help="Peak learning rate")] = 3e-4,
     warmup_ratio: Annotated[float, typer.Option(help="Fraction of training for LR warmup")] = 0.05,
@@ -172,11 +278,27 @@ def train(
     track_online: Annotated[bool, typer.Option(help="Track experiment online with wandb")] = True,
     # Reproducibility
     seed: Annotated[int, typer.Option(help="Random seed for reproducibility")] = 42,
+    deterministic: Annotated[bool, typer.Option(help="Use deterministic algorithms (slower but fully reproducible)")] = False,
 ):
-    """Train GPT-2 on the specified dataset."""
-    device = get_device()
-    print(f"Using device: {device}")
-    print(f"Dataset: {dataset.value}")
+    """Train GPT-2 on the specified dataset.
+    
+    Supports both single-GPU and multi-GPU (DDP) training.
+    For multi-GPU, launch with torchrun:
+        torchrun --nproc_per_node=N train_gpt2.py [options]
+    """
+    # Setup DDP if running in distributed mode
+    rank, world_size, local_rank, device = setup_ddp()
+    
+    # Set random seeds for reproducibility (before any model/data initialization)
+    set_seed(seed, deterministic=deterministic)
+    if is_main_process():
+        print(f"Random seed: {seed}" + (" (deterministic mode)" if deterministic else ""))
+    
+    if is_main_process():
+        print(f"Using device: {device}")
+        print(f"Dataset: {dataset.value}")
+        if world_size > 1:
+            print(f"DDP: {world_size} GPUs")
 
     # Auto-generate run name if not provided
     if not wandb_run_name:
@@ -202,32 +324,37 @@ def train(
     )
 
     # Create streaming text datasets that tokenize on-the-fly
+    # In DDP mode, each worker gets a unique shard of the data
+    ddp_kwargs = {"rank": rank, "world_size": world_size} if world_size > 1 else {}
     train_dataset = StreamingTextDataset(
         dataset=train_data,
         tokenizer=tokenizer,
         seq_len=seq_len,
         text_fn=text_fn,
+        **ddp_kwargs,
     )
     val_dataset = StreamingTextDataset(
         dataset=val_data,
         tokenizer=tokenizer,
         seq_len=seq_len,
         text_fn=text_fn,
+        **ddp_kwargs,
     )
 
     # Note: num_workers=0 is required for HuggingFace datasets to avoid pickling issues
     # pin_memory=True speeds up GPU transfers when using CUDA
+    use_cuda = device.startswith("cuda")
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         num_workers=0,
-        pin_memory=device == "cuda",
+        pin_memory=use_cuda,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         num_workers=0,
-        pin_memory=device == "cuda",
+        pin_memory=use_cuda,
     )
     
     # Create training iterator
@@ -235,10 +362,12 @@ def train(
     
     # Cache fixed validation batches for consistent evaluation across training
     # This ensures validation loss is comparable between different steps
-    print(f"Caching {val_batches} validation batches...")
+    if is_main_process():
+        print(f"Caching {val_batches} validation batches...")
     val_iter = iter(val_loader)
     cached_val_batches = [next(val_iter) for _ in range(val_batches)]
-    print(f"  Cached {len(cached_val_batches)} batches ({len(cached_val_batches) * batch_size * seq_len:,} tokens)")
+    if is_main_process():
+        print(f"  Cached {len(cached_val_batches)} batches ({len(cached_val_batches) * batch_size * seq_len:,} tokens)")
 
     # Create model
     config = GPT2Config(
@@ -251,30 +380,47 @@ def train(
     )
     model = GPT2(config)
     model = model.to(device)
+    
+    if is_main_process():
+        n_params = sum(p.numel() for p in model.parameters())
+        print(f"GPT-2 model with {n_params:,} parameters")
 
     # Apply torch.compile for faster execution (PyTorch 2.0+)
-    if use_compile and device == "cuda" and hasattr(torch, "compile"):
-        print("Compiling model with torch.compile...")
+    if use_compile and use_cuda and hasattr(torch, "compile"):
+        if is_main_process():
+            print("Compiling model with torch.compile...")
         # Use 'default' mode instead of 'reduce-overhead' to avoid CUDA graph issues
         model = torch.compile(model, mode="default")  # type: ignore[assignment]
-        print("Model compiled successfully!")
+        if is_main_process():
+            print("Model compiled successfully!")
+    
+    # Wrap model in DDP for distributed training
+    if world_size > 1:
+        model = DDP(model, device_ids=[local_rank])  # type: ignore[assignment]
+        if is_main_process():
+            print(f"Model wrapped in DDP")
 
     # Calculate number of optimizer steps from num_tokens
     # num_tokens is in billions, convert to actual token count
     num_tokens_actual = int(num_tokens * 1e9)
     # StreamingTextDataset yields (seq_len + 1) tokens, giving us seq_len predictions
-    # Each optimizer step processes batch_size * seq_len * gradient_accumulate tokens
-    tokens_per_batch = batch_size * seq_len
-    tokens_per_step = tokens_per_batch * gradient_accumulate
+    # Each optimizer step processes batch_size * seq_len * gradient_accumulate * world_size tokens
+    # (In DDP, each GPU processes batch_size samples, so global batch = batch_size * world_size)
+    tokens_per_batch = batch_size * seq_len  # Per GPU
+    global_tokens_per_batch = tokens_per_batch * world_size  # Across all GPUs
+    tokens_per_step = global_tokens_per_batch * gradient_accumulate
     num_steps = num_tokens_actual // tokens_per_step
-    print(f"Training configuration:")
-    print(f"  Total tokens: {num_tokens_actual:,} ({num_tokens}B)")
-    print(f"  Batch size: {batch_size}")
-    print(f"  Sequence length: {seq_len}")
-    print(f"  Gradient accumulation: {gradient_accumulate}")
-    print(f"  Tokens per microbatch: {tokens_per_batch:,}")
-    print(f"  Tokens per optimizer step: {tokens_per_step:,}")
-    print(f"  Number of optimizer steps: {num_steps:,}")
+    if is_main_process():
+        print(f"Training configuration:")
+        print(f"  Total tokens: {num_tokens_actual:,} ({num_tokens}B)")
+        print(f"  Number of GPUs: {world_size}")
+        print(f"  Batch size per GPU: {batch_size}")
+        print(f"  Global batch size: {batch_size * world_size}")
+        print(f"  Sequence length: {seq_len}")
+        print(f"  Gradient accumulation: {gradient_accumulate}")
+        print(f"  Tokens per microbatch (per GPU): {tokens_per_batch:,}")
+        print(f"  Tokens per optimizer step (global): {tokens_per_step:,}")
+        print(f"  Number of optimizer steps: {num_steps:,}")
 
     # Optimizer
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
@@ -304,72 +450,86 @@ def train(
     
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=get_lr_multiplier)
     
-    print(f"Learning rate schedule:")
-    print(f"  Warmup steps: {warmup_steps:,} ({warmup_ratio*100:.1f}%)")
-    print(f"  Cooldown steps: {cooldown_steps:,} ({cooldown_ratio*100:.1f}%)")
-    print(f"  Constant steps: {num_steps - warmup_steps - cooldown_steps:,}")
-    print(f"  Peak LR: {learning_rate:.2e}")
-    print(f"  Min LR: {learning_rate * min_learning_rate_frac:.2e} ({min_learning_rate_frac*100:.1f}% of peak)")
+    if is_main_process():
+        print(f"Learning rate schedule:")
+        print(f"  Warmup steps: {warmup_steps:,} ({warmup_ratio*100:.1f}%)")
+        print(f"  Cooldown steps: {cooldown_steps:,} ({cooldown_ratio*100:.1f}%)")
+        print(f"  Constant steps: {num_steps - warmup_steps - cooldown_steps:,}")
+        print(f"  Peak LR: {learning_rate:.2e}")
+        print(f"  Min LR: {learning_rate * min_learning_rate_frac:.2e} ({min_learning_rate_frac*100:.1f}% of peak)")
 
     # Mixed precision training scaler
-    scaler = GradScaler(device=device) if use_amp and device == "cuda" else None
-    if scaler:
+    scaler = GradScaler(device=device) if use_amp and use_cuda else None
+    if scaler and is_main_process():
         print("Mixed precision training (AMP) enabled")
 
-    # Initialize wandb
-    wandb.init(  # type: ignore[attr-defined]
-        project=wandb_project,
-        name=wandb_run_name,
-        mode="online" if track_online else "offline",
-        config={
-            "dataset": dataset.value,
-            "shuffle_buffer_size": shuffle_buffer_size,
-            # FinePDFs-Edu config
-            "finepdfs_filter_english": finepdfs_filter_english,
-            "finepdfs_english_threshold": finepdfs_english_threshold,
-            # FineWeb-Edu config
-            "fineweb_subset": fineweb_subset,
-            "fineweb_min_edu_score": fineweb_min_edu_score,
-            "fineweb_language": fineweb_language,
-            "fineweb_min_lang_score": fineweb_min_lang_score,
-            "seed": seed,
-            "num_tokens": num_tokens_actual,
-            "num_tokens_billions": num_tokens,
-            "num_steps": num_steps,
-            "tokens_per_step": tokens_per_step,
-            "batch_size": batch_size,
-            "gradient_accumulate": gradient_accumulate,
-            "learning_rate": learning_rate,
-            "warmup_ratio": warmup_ratio,
-            "cooldown_ratio": cooldown_ratio,
-            "min_learning_rate_frac": min_learning_rate_frac,
-            "warmup_steps": warmup_steps,
-            "cooldown_steps": cooldown_steps,
-            "use_amp": use_amp and device == "cuda",
-            "use_compile": use_compile and device == "cuda",
-            "seq_len": seq_len,
-            "embedding_dim": embedding_dim,
-            "num_heads": num_heads,
-            "num_layers": num_layers,
-            "dropout": dropout,
-            "model_params": model.get_num_params(),
-        },
-    )
+    # Get model params (handle DDP wrapper)
+    model_for_params = model.module if isinstance(model, DDP) else model
+    num_params = model_for_params.get_num_params()
 
-    # Setup JSON logging
-    logs_dir = Path("logs")
-    logs_dir.mkdir(exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    metrics_file = logs_dir / f"metrics_{timestamp}_{wandb_run_name}.json"
+    # Initialize wandb (only on main process)
+    if is_main_process():
+        wandb.init(  # type: ignore[attr-defined]
+            project=wandb_project,
+            name=wandb_run_name,
+            mode="online" if track_online else "offline",
+            config={
+                "dataset": dataset.value,
+                "shuffle_buffer_size": shuffle_buffer_size,
+                # FinePDFs-Edu config
+                "finepdfs_filter_english": finepdfs_filter_english,
+                "finepdfs_english_threshold": finepdfs_english_threshold,
+                # FineWeb-Edu config
+                "fineweb_subset": fineweb_subset,
+                "fineweb_min_edu_score": fineweb_min_edu_score,
+                "fineweb_language": fineweb_language,
+                "fineweb_min_lang_score": fineweb_min_lang_score,
+                "seed": seed,
+                "num_tokens": num_tokens_actual,
+                "num_tokens_billions": num_tokens,
+                "num_steps": num_steps,
+                "tokens_per_step": tokens_per_step,
+                "batch_size": batch_size,
+                "global_batch_size": batch_size * world_size,
+                "gradient_accumulate": gradient_accumulate,
+                "learning_rate": learning_rate,
+                "warmup_ratio": warmup_ratio,
+                "cooldown_ratio": cooldown_ratio,
+                "min_learning_rate_frac": min_learning_rate_frac,
+                "warmup_steps": warmup_steps,
+                "cooldown_steps": cooldown_steps,
+                "use_amp": use_amp and use_cuda,
+                "use_compile": use_compile and use_cuda,
+                "seq_len": seq_len,
+                "embedding_dim": embedding_dim,
+                "num_heads": num_heads,
+                "num_layers": num_layers,
+                "dropout": dropout,
+                "model_params": num_params,
+                # DDP config
+                "world_size": world_size,
+                "ddp": world_size > 1,
+            },
+        )
+
+    # Setup JSON logging (only on main process)
     metrics_history = []
+    metrics_file = None
+    if is_main_process():
+        logs_dir = Path("logs")
+        logs_dir.mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        metrics_file = logs_dir / f"metrics_{timestamp}_{wandb_run_name}.json"
 
     # Training loop
-    print("\n" + "=" * 60)
-    print("Starting training")
-    print("=" * 60)
+    if is_main_process():
+        print("\n" + "=" * 60)
+        print("Starting training")
+        print("=" * 60)
 
     tokens_seen = 0
-    for step in tqdm.tqdm(range(num_steps), desc="Training"):
+    pbar = tqdm.tqdm(range(num_steps), desc="Training", disable=not is_main_process())
+    for step in pbar:
         model.train()
         optimizer.zero_grad()
         accumulated_loss = 0.0
@@ -379,8 +539,10 @@ def train(
             input_ids = batch[:, :-1]
             targets = batch[:, 1:]
 
+            # For DDP, we need to specify the device type without the index
+            device_type = "cuda" if use_cuda else device
             if scaler:
-                with autocast(device_type=device):
+                with autocast(device_type=device_type):
                     _, loss = model(input_ids, targets)
                     loss = loss / gradient_accumulate
                 scaler.scale(loss).backward()
@@ -407,13 +569,16 @@ def train(
 
         tokens_seen += tokens_per_step
 
-        wandb.log({"train_loss": accumulated_loss, "lr": current_lr, "step": step, "tokens_seen": tokens_seen})  # type: ignore[attr-defined]
-        metrics_history.append({"step": step, "train_loss": accumulated_loss, "lr": current_lr, "tokens_seen": tokens_seen})
-        if step % 10 == 0:
-            tqdm.tqdm.write(f"step {step:5d} | train loss: {accumulated_loss:.4f} | lr: {current_lr:.2e} | tokens: {tokens_seen:,}")
+        # Logging (only on main process)
+        if is_main_process():
+            wandb.log({"train_loss": accumulated_loss, "lr": current_lr, "step": step, "tokens_seen": tokens_seen})  # type: ignore[attr-defined]
+            metrics_history.append({"step": step, "train_loss": accumulated_loss, "lr": current_lr, "tokens_seen": tokens_seen})
+            if step % 10 == 0:
+                tqdm.tqdm.write(f"step {step:5d} | train loss: {accumulated_loss:.4f} | lr: {current_lr:.2e} | tokens: {tokens_seen:,}")
 
         # Validation (uses cached batches for consistent comparison across training)
-        if step % validate_every == 0:
+        # Only run on main process to avoid redundant computation
+        if step % validate_every == 0 and is_main_process():
             model.eval()
             total_val_loss = 0.0
             with torch.no_grad():
@@ -422,7 +587,7 @@ def train(
                     val_input = val_batch[:, :-1]
                     val_targets = val_batch[:, 1:]
                     if scaler:
-                        with autocast(device_type=device):
+                        with autocast(device_type=device_type):
                             _, val_loss = model(val_input, val_targets)
                     else:
                         _, val_loss = model(val_input, val_targets)
@@ -433,8 +598,8 @@ def train(
             metrics_history.append({"step": step, "val_loss": avg_val_loss, "tokens_seen": tokens_seen})
             tqdm.tqdm.write(f"step {step:5d} | val loss: {avg_val_loss:.4f} (avg of {len(cached_val_batches)} batches)")
 
-        # Generation
-        if step % generate_every == 0 and step > 0:
+        # Generation (only on main process)
+        if step % generate_every == 0 and step > 0 and is_main_process():
             model.eval()
 
             # Use a fixed prompt for generation
@@ -447,8 +612,10 @@ def train(
             tqdm.tqdm.write("-" * 60)
 
             # Generate (stop early if EOS token is produced)
+            # Use the underlying model for generation (not DDP wrapper)
+            gen_model = model.module if isinstance(model, DDP) else model
             prompt_tensor = torch.tensor([prompt_tokens], dtype=torch.long).to(device)
-            generated = model.generate(
+            generated = gen_model.generate(
                 prompt_tensor,
                 max_new_tokens=generate_length,
                 temperature=0.8,
@@ -460,13 +627,16 @@ def train(
             tqdm.tqdm.write(f"GENERATED:\n{output}")
             tqdm.tqdm.write("=" * 60 + "\n")
 
-    # Save metrics to JSON
-    with open(metrics_file, "w") as f:
-        json.dump(metrics_history, f, indent=2)
-    print(f"\nMetrics saved to {metrics_file}")
-
-    wandb.finish()  # type: ignore[attr-defined]
-    print("Training complete!")
+    # Save metrics to JSON (only on main process)
+    if is_main_process() and metrics_file is not None:
+        with open(metrics_file, "w") as f:
+            json.dump(metrics_history, f, indent=2)
+        print(f"\nMetrics saved to {metrics_file}")
+        wandb.finish()  # type: ignore[attr-defined]
+        print("Training complete!")
+    
+    # Clean up DDP
+    cleanup_ddp()
 
 
 if __name__ == "__main__":

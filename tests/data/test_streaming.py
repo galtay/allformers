@@ -312,3 +312,148 @@ class TestLoadWikipediaStreaming:
         # Sanity check: we got documents from both
         assert len(train_ids) == 1000, f"Expected 1000 train docs, got {len(train_ids)}"
         assert len(val_ids) == 1000, f"Expected 1000 val docs, got {len(val_ids)}"
+
+
+@pytest.mark.slow
+class TestStreamingTextDatasetDDP:
+    """Tests for StreamingTextDataset DDP (distributed) support."""
+
+    def test_rank_world_size_validation(self, tokenizer, small_streaming_dataset):
+        """Should raise error if only rank or world_size is provided."""
+        with pytest.raises(ValueError, match="rank and world_size must both be provided"):
+            StreamingTextDataset(
+                dataset=small_streaming_dataset,
+                tokenizer=tokenizer,
+                seq_len=64,
+                text_fn=wikipedia_text_fn,
+                rank=0,  # Only rank, no world_size
+            )
+        
+        with pytest.raises(ValueError, match="rank and world_size must both be provided"):
+            StreamingTextDataset(
+                dataset=small_streaming_dataset,
+                tokenizer=tokenizer,
+                seq_len=64,
+                text_fn=wikipedia_text_fn,
+                world_size=4,  # Only world_size, no rank
+            )
+
+    def test_invalid_rank_value(self, tokenizer, small_streaming_dataset):
+        """Should raise error if rank is out of valid range."""
+        with pytest.raises(ValueError, match="rank must be in"):
+            StreamingTextDataset(
+                dataset=small_streaming_dataset,
+                tokenizer=tokenizer,
+                seq_len=64,
+                text_fn=wikipedia_text_fn,
+                rank=4,  # Invalid: should be < world_size
+                world_size=4,
+            )
+        
+        with pytest.raises(ValueError, match="rank must be in"):
+            StreamingTextDataset(
+                dataset=small_streaming_dataset,
+                tokenizer=tokenizer,
+                seq_len=64,
+                text_fn=wikipedia_text_fn,
+                rank=-1,  # Invalid: should be >= 0
+                world_size=4,
+            )
+
+    def test_different_ranks_get_different_data(self, tokenizer, small_streaming_dataset):
+        """Different ranks should yield different sequences."""
+        world_size = 2
+        
+        # Create datasets for different ranks
+        sequences_by_rank = []
+        for rank in range(world_size):
+            dataset = StreamingTextDataset(
+                dataset=small_streaming_dataset,
+                tokenizer=tokenizer,
+                seq_len=64,
+                text_fn=wikipedia_text_fn,
+                rank=rank,
+                world_size=world_size,
+            )
+            
+            # Collect first 3 sequences from each rank
+            seqs = []
+            for i, seq in enumerate(dataset):
+                seqs.append(tuple(seq.tolist()))
+                if i >= 2:
+                    break
+            sequences_by_rank.append(seqs)
+        
+        # Flatten and check uniqueness
+        all_seqs = [seq for seqs in sequences_by_rank for seq in seqs]
+        unique_seqs = set(all_seqs)
+        
+        # All sequences should be unique across ranks
+        assert len(all_seqs) == len(unique_seqs), "Ranks should get different sequences"
+
+    def test_same_rank_is_deterministic(self, tokenizer, small_streaming_dataset):
+        """Same rank should yield same sequences on repeated iterations."""
+        rank = 1
+        world_size = 2
+        
+        # First iteration
+        dataset1 = StreamingTextDataset(
+            dataset=small_streaming_dataset,
+            tokenizer=tokenizer,
+            seq_len=64,
+            text_fn=wikipedia_text_fn,
+            rank=rank,
+            world_size=world_size,
+        )
+        seqs1 = []
+        for i, seq in enumerate(dataset1):
+            seqs1.append(tuple(seq.tolist()))
+            if i >= 2:
+                break
+        
+        # Second iteration with same parameters
+        dataset2 = StreamingTextDataset(
+            dataset=small_streaming_dataset,
+            tokenizer=tokenizer,
+            seq_len=64,
+            text_fn=wikipedia_text_fn,
+            rank=rank,
+            world_size=world_size,
+        )
+        seqs2 = []
+        for i, seq in enumerate(dataset2):
+            seqs2.append(tuple(seq.tolist()))
+            if i >= 2:
+                break
+        
+        assert seqs1 == seqs2, "Same rank should produce same sequences"
+
+    def test_stores_rank_and_world_size(self, tokenizer, small_streaming_dataset):
+        """Should store rank and world_size as attributes."""
+        dataset = StreamingTextDataset(
+            dataset=small_streaming_dataset,
+            tokenizer=tokenizer,
+            seq_len=64,
+            text_fn=wikipedia_text_fn,
+            rank=2,
+            world_size=4,
+        )
+        
+        assert dataset.rank == 2
+        assert dataset.world_size == 4
+
+    def test_no_sharding_when_not_specified(self, tokenizer, small_streaming_dataset):
+        """When rank/world_size not provided, should not shard."""
+        dataset = StreamingTextDataset(
+            dataset=small_streaming_dataset,
+            tokenizer=tokenizer,
+            seq_len=64,
+            text_fn=wikipedia_text_fn,
+        )
+        
+        assert dataset.rank is None
+        assert dataset.world_size is None
+        
+        # Should still work normally
+        seq = next(iter(dataset))
+        assert seq.shape == (65,)

@@ -1,7 +1,8 @@
 """Tests for the FineWeb-Edu dataset module."""
 
 import pytest
-from datasets import IterableDataset
+from datasets import IterableDataset, load_dataset
+from datasets.distributed import split_dataset_by_node
 
 from allformers.data.fineweb_edu import (
     FINEWEB_EDU_DATASET_PATH,
@@ -302,4 +303,104 @@ class TestNoTrainValOverlap:
         assert len(overlap) == 0, f"Found {len(overlap)} overlapping document IDs between train and val"
         
         print(f"Verified no overlap: {len(train_ids)} train IDs, {len(val_ids)} val IDs")
+
+
+@pytest.mark.slow
+class TestFineWebEduSharding:
+    """Tests for sharding FineWeb-Edu dataset across multiple workers (DDP support)."""
+
+    def test_n_shards_property(self):
+        """FineWeb-Edu default subset should have many shards for DDP."""
+        dataset = load_dataset(
+            "HuggingFaceFW/fineweb-edu",
+            name="default",
+            split="train",
+            streaming=True,
+        )
+        
+        n_shards = dataset.n_shards
+        # Default subset has 2410 shards
+        assert n_shards > 100, f"Expected many shards, got {n_shards}"
+        print(f"FineWeb-Edu default has {n_shards} shards")
+
+    def test_shard_method_splits_data(self):
+        """Different ranks should get different documents using .shard()."""
+        dataset = load_dataset(
+            "HuggingFaceFW/fineweb-edu",
+            name="default",
+            split="train",
+            streaming=True,
+        )
+        
+        world_size = 8
+        
+        # Collect first 2 document IDs from each rank
+        worker_ids = []
+        for rank in range(world_size):
+            sharded = dataset.shard(num_shards=world_size, index=rank)
+            ids = []
+            for i, example in enumerate(sharded):
+                ids.append(example["id"])
+                if i >= 1:
+                    break
+            worker_ids.append(ids)
+        
+        # All IDs should be unique across workers
+        all_ids = [id for ids in worker_ids for id in ids]
+        assert len(all_ids) == len(set(all_ids)), "Workers should get different documents"
+
+    def test_split_dataset_by_node(self):
+        """split_dataset_by_node should distribute data across workers."""
+        dataset = load_dataset(
+            "HuggingFaceFW/fineweb-edu",
+            name="default",
+            split="train",
+            streaming=True,
+        )
+        
+        world_size = 8
+        
+        # Collect first 2 document IDs from each rank
+        worker_ids = []
+        for rank in range(world_size):
+            sharded = split_dataset_by_node(dataset, rank=rank, world_size=world_size)
+            ids = []
+            for i, example in enumerate(sharded):
+                ids.append(example["id"])
+                if i >= 1:
+                    break
+            worker_ids.append(ids)
+        
+        # All IDs should be unique across workers
+        all_ids = [id for ids in worker_ids for id in ids]
+        assert len(all_ids) == len(set(all_ids)), "Workers should get different documents"
+
+    def test_sharding_is_deterministic(self):
+        """Same rank should get same data on repeated calls."""
+        dataset = load_dataset(
+            "HuggingFaceFW/fineweb-edu",
+            name="default",
+            split="train",
+            streaming=True,
+        )
+        
+        world_size = 4
+        rank = 1
+        
+        # Get IDs twice for the same rank
+        ids1 = []
+        sharded1 = dataset.shard(num_shards=world_size, index=rank)
+        for i, example in enumerate(sharded1):
+            ids1.append(example["id"])
+            if i >= 2:
+                break
+        
+        ids2 = []
+        sharded2 = dataset.shard(num_shards=world_size, index=rank)
+        for i, example in enumerate(sharded2):
+            ids2.append(example["id"])
+            if i >= 2:
+                break
+        
+        assert ids1 == ids2, "Same rank should get same data"
 

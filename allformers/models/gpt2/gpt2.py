@@ -643,10 +643,6 @@ class GPT2(nn.Module):
         if config.scale_residual_init:
             self._init_residual_projections()
 
-        # Report number of parameters
-        n_params = sum(p.numel() for p in self.parameters())
-        print(f"GPT-2 model with {n_params:,} parameters")
-
     def _init_weights(self, module: nn.Module) -> None:
         """Initialize weights following GPT-2 paper.
 
