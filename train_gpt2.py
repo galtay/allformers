@@ -34,6 +34,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 import typer
 import wandb
+import datasets
 
 from allformers.models.gpt2.gpt2 import GPT2, GPT2Config
 from allformers.data.streaming import StreamingTextDataset
@@ -288,6 +289,10 @@ def train(
     """
     # Setup DDP if running in distributed mode
     rank, world_size, local_rank, device = setup_ddp()
+    
+    # Disable HuggingFace datasets progress bars on non-main processes
+    if not is_main_process():
+        datasets.disable_progress_bar()
     
     # Set random seeds for reproducibility (before any model/data initialization)
     set_seed(seed, deterministic=deterministic)
