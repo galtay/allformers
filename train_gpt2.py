@@ -74,6 +74,8 @@ def load_dataset_for_training(
     fineweb_min_edu_score: float | None = None,
     fineweb_language: str | None = "en",
     fineweb_min_lang_score: float | None = None,
+    # Verbose output
+    verbose: bool = True,
 ) -> tuple:
     """Load train/val streaming datasets for the specified dataset.
     
@@ -87,6 +89,7 @@ def load_dataset_for_training(
         train_data, val_data = load_wikipedia_streaming(
             shuffle_buffer_size=shuffle_buffer_size,
             seed=seed,
+            verbose=verbose,
         )
         return train_data, val_data, wikipedia_text_fn
     
@@ -96,6 +99,7 @@ def load_dataset_for_training(
             seed=seed,
             filter_english=finepdfs_filter_english,
             english_threshold=finepdfs_english_threshold,
+            verbose=verbose,
         )
         return train_data, val_data, finepdfs_edu_text_fn
     
@@ -107,6 +111,7 @@ def load_dataset_for_training(
             min_score=fineweb_min_edu_score,
             filter_language=fineweb_language,
             min_language_score=fineweb_min_lang_score,
+            verbose=verbose,
         )
         return train_data, val_data, fineweb_edu_text_fn
     
@@ -326,6 +331,8 @@ def train(
         fineweb_min_edu_score=fineweb_min_edu_score,
         fineweb_language=fineweb_language,
         fineweb_min_lang_score=fineweb_min_lang_score,
+        # Only print from main process
+        verbose=is_main_process(),
     )
 
     # Create streaming text datasets that tokenize on-the-fly

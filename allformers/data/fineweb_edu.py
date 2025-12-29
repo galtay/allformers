@@ -164,6 +164,7 @@ def load_fineweb_edu_streaming(
     min_language_score: Optional[float] = None,
     cache_dir: Optional[str] = None,
     token: Optional[str] = None,
+    verbose: bool = True,
 ) -> tuple[IterableDataset, IterableDataset]:
     """Load FineWeb-Edu as streaming train/val splits with shuffling.
     
@@ -187,6 +188,7 @@ def load_fineweb_edu_streaming(
             in the language detection (0.0-1.0). Default is None (no filtering).
         cache_dir: Directory to cache downloaded data.
         token: HuggingFace token for authentication.
+        verbose: Whether to print dataset loading info. Default True.
         
     Returns:
         Tuple of (train_dataset, val_dataset) as shuffled IterableDatasets.
@@ -257,16 +259,17 @@ def load_fineweb_edu_streaming(
         seed=seed + 1,  # Different seed for validation
     )
     
-    print(f"Loaded FineWeb-Edu dataset (streaming mode):")
-    print(f"  Subset: {subset}")
-    if filter_language is not None:
-        print(f"  Language filter: {filter_language}")
-    if min_language_score is not None:
-        print(f"  Language score filter: >= {min_language_score}")
-    if min_score is not None:
-        print(f"  Educational score filter: >= {min_score}")
-    print(f"  Training: ~95% of documents (shuffle buffer: {shuffle_buffer_size:,})")
-    print(f"  Validation: ~5% of documents")
+    if verbose:
+        print(f"Loaded FineWeb-Edu dataset (streaming mode):")
+        print(f"  Subset: {subset}")
+        if filter_language is not None:
+            print(f"  Language filter: {filter_language}")
+        if min_language_score is not None:
+            print(f"  Language score filter: >= {min_language_score}")
+        if min_score is not None:
+            print(f"  Educational score filter: >= {min_score}")
+        print(f"  Training: ~95% of documents (shuffle buffer: {shuffle_buffer_size:,})")
+        print(f"  Validation: ~5% of documents")
     
     return train_dataset, val_dataset
 

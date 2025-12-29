@@ -230,6 +230,7 @@ def load_finepdfs_edu_streaming(
     english_threshold: float = 0.8,
     cache_dir: Optional[str] = None,
     token: Optional[str] = None,
+    verbose: bool = True,
 ) -> tuple[IterableDataset, IterableDataset]:
     """Load FinePDFs-Edu dataset as streaming IterableDatasets with shuffle buffers.
 
@@ -257,6 +258,7 @@ def load_finepdfs_edu_streaming(
         cache_dir: Directory to cache the downloaded dataset.
         token: HuggingFace token for authentication. If None, uses the HF_TOKEN
             environment variable or cached token.
+        verbose: Whether to print dataset loading info. Default True.
 
     Returns:
         Tuple of (train_dataset, val_dataset) as shuffled IterableDatasets.
@@ -315,12 +317,13 @@ def load_finepdfs_edu_streaming(
     train_dataset = train_dataset.shuffle(seed=seed, buffer_size=shuffle_buffer_size)
     val_dataset = val_dataset.shuffle(seed=seed + 1, buffer_size=shuffle_buffer_size)
     
-    print(f"Loaded FinePDFs-Edu dataset (streaming mode):")
-    print(f"  Subset: {subset}")
-    if filter_english:
-        print(f"  English filter: >{english_threshold*100:.0f}% of pages must be English")
-    print(f"  Training: ~95% of documents (shuffle buffer: {shuffle_buffer_size:,})")
-    print(f"  Validation: ~5% of documents")
+    if verbose:
+        print(f"Loaded FinePDFs-Edu dataset (streaming mode):")
+        print(f"  Subset: {subset}")
+        if filter_english:
+            print(f"  English filter: >{english_threshold*100:.0f}% of pages must be English")
+        print(f"  Training: ~95% of documents (shuffle buffer: {shuffle_buffer_size:,})")
+        print(f"  Validation: ~5% of documents")
 
     return train_dataset, val_dataset
 
