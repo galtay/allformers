@@ -65,10 +65,10 @@ def train(
     finepdfs_filter_english: Annotated[bool, typer.Option(help="[finepdfs] Filter for majority English documents")] = True,
     finepdfs_english_threshold: Annotated[float, typer.Option(help="[finepdfs] Fraction of pages that must be English (0.0-1.0)")] = 0.8,
     # FineWeb-Edu specific options (uses language column from web crawl metadata)
-    fineweb_subset: Annotated[str, typer.Option(help="[fineweb] Subset: default, sample-10BT, sample-100BT, sample-350BT, CC-MAIN-*")] = "sample-10BT",
+    fineweb_subset: Annotated[str, typer.Option(help="[fineweb] Subset: default, sample-10BT, sample-100BT, sample-350BT, CC-MAIN-*")] = "default",
     fineweb_min_edu_score: Annotated[float | None, typer.Option(help="[fineweb] Min educational score (higher=more educational)")] = None,
     fineweb_language: Annotated[str | None, typer.Option(help="[fineweb] Filter by language column (e.g., 'en'), None to disable")] = "en",
-    fineweb_min_lang_score: Annotated[float | None, typer.Option(help="[fineweb] Min language detection confidence (0.0-1.0)")] = None,
+    fineweb_min_lang_score: Annotated[float | None, typer.Option(help="[fineweb] Min language detection confidence (0.0-1.0)")] = 0.8,
     # Training hyperparameters
     num_tokens: Annotated[float, typer.Option(help="Total number of tokens to train on (in billions, e.g., 0.01 = 10M tokens)")] = 0.01,
     batch_size: Annotated[int, typer.Option(help="Batch size per GPU")] = 32,
