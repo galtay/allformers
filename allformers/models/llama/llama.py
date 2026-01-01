@@ -137,17 +137,34 @@ class LlamaConfig(BaseModel):
         token = os.environ.get("HF_TOKEN")
         hf_config = HFLlamaConfig.from_pretrained(model_name, token=token)
         
+        # Extract rope_theta from rope_parameters
+        # rope_parameters can be None, a dict, or a RopeParameters object
+        rope_theta: float = 10000.0  # default
+        if hf_config.rope_parameters is not None:
+            if isinstance(hf_config.rope_parameters, dict):
+                rope_theta_val = hf_config.rope_parameters.get("rope_theta", 10000.0)
+                if isinstance(rope_theta_val, (int, float)):
+                    rope_theta = float(rope_theta_val)
+            elif hasattr(hf_config.rope_parameters, "rope_theta"):
+                rope_theta_val = getattr(hf_config.rope_parameters, "rope_theta")
+                if isinstance(rope_theta_val, (int, float)):
+                    rope_theta = float(rope_theta_val)
+            elif hasattr(hf_config.rope_parameters, "get"):
+                rope_theta_val = hf_config.rope_parameters.get("rope_theta", 10000.0)
+                if isinstance(rope_theta_val, (int, float)):
+                    rope_theta = float(rope_theta_val)
+        
         return cls(
-            vocab_size=hf_config.vocab_size,
-            context_length=hf_config.max_position_embeddings,
-            embedding_dim=hf_config.hidden_size,
-            num_heads=hf_config.num_attention_heads,
-            num_key_value_heads=hf_config.num_key_value_heads,  # Use the field name
-            num_layers=hf_config.num_hidden_layers,
-            intermediate_size=hf_config.intermediate_size,
-            rms_norm_eps=hf_config.rms_norm_eps,
+            vocab_size=hf_config.vocab_size or 128256,
+            context_length=hf_config.max_position_embeddings or 8192,
+            embedding_dim=hf_config.hidden_size or 2048,
+            num_heads=hf_config.num_attention_heads or 16,
+            num_key_value_heads=hf_config.num_key_value_heads,  # Can be None, which is handled by property
+            num_layers=hf_config.num_hidden_layers or 16,
+            intermediate_size=hf_config.intermediate_size,  # Can be None, which is handled by property
+            rms_norm_eps=hf_config.rms_norm_eps or 1e-6,
             dropout=0.0,  # No dropout in pretrained models
-            rope_theta=hf_config.rope_parameters.get("rope_theta", 10000.0),
+            rope_theta=rope_theta,
         )
 
 
