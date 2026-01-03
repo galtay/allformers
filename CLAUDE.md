@@ -1,0 +1,118 @@
+# Claude Code Guidelines
+
+This document describes conventions and preferences for working on this codebase.
+
+## Project Management
+
+This project uses **uv** for Python project management.
+
+### Installation
+
+```bash
+# Install core dependencies
+uv sync
+
+# Install with dev dependencies (pytest, ipython)
+uv sync --extra dev
+```
+
+### Running Commands
+
+Always use `uv run` to execute Python commands:
+
+```bash
+uv run python script.py
+uv run pytest
+```
+
+## Testing
+
+Tests are managed with **pytest**. Some tests are marked as `slow` because they download data from HuggingFace.
+
+### Running Tests
+
+```bash
+# Run all tests (includes slow tests)
+uv run pytest
+
+# Run only fast tests (skip slow tests)
+uv run pytest -m "not slow"
+
+# Run only slow tests
+uv run pytest -m slow
+
+# Run with verbose output
+uv run pytest -v
+```
+
+## Code Organization
+
+### One Model, One File
+
+Each model implementation should be contained in a single file for easy reading. For example, the entire GPT-2 implementation lives in `allformers/models/gpt2/gpt2.py`.
+
+### One Dataset, One File
+
+Similarly, each dataset module should be self-contained. Wikipedia utilities are in `allformers/data/wikipedia.py`, FinePDFs-Edu in `allformers/data/finepdfs_edu.py`.
+
+## Import Conventions
+
+### No Import Aliases in `__init__.py`
+
+Do **not** use `__init__.py` files to create import aliases. Keep `__init__.py` files minimal (empty or just containing version info for the root package).
+
+### Use Full Import Paths
+
+Always import from the full module path:
+
+```python
+# Good
+from allformers.data.wikipedia import load_wikipedia
+
+# Bad - relies on __init__.py alias
+from allformers.data import load_wikipedia
+```
+
+### No Docstrings in `__init__.py`
+
+Do not put module docstrings in `__init__.py` files. Instead, create a `README.md` in the directory if documentation is needed.
+
+### No Deferred or Conditional Imports
+
+Do not use deferred imports (inside functions) or conditional imports (`if TYPE_CHECKING`) for dependencies that are actually used at runtime. Keep imports simple and at the top level.
+
+## Type Annotations
+
+### Use `Self` for Class Method Return Types
+
+When a class method returns an instance of the class, use `Self` from the `typing` module instead of quoting the class name:
+
+```python
+from typing import Self
+
+class MyConfig:
+    @classmethod
+    def default(cls) -> Self:
+        return cls()
+```
+
+## HuggingFace Datasets
+
+When working with HuggingFace streaming datasets, be aware of resource cleanup issues that can cause tests to hang.
+
+### Avoiding Hangs in Tests
+
+1. **Use small shuffle buffers in tests**: Large buffers take time to fill. Use small buffers (e.g., 10) for faster tests.
+2. **Explicitly delete dataset iterators**: Streaming datasets hold network connections. Delete them when done.
+3. **Disable filters when not testing them**: Language/score filters slow down iteration. Pass `filter_language=None` when the test doesn't need filtering.
+4. **Iterate only what you need**: Don't iterate 1000 items when 10 suffice.
+
+### Cleanup Errors
+
+You may see errors like `'[Errno 9] Bad file descriptor'` during cleanup. These are harmless - they occur when the script exits while background download threads are still active.
+
+## Documentation
+
+- Use docstrings in the actual module files (`.py` files with implementations)
+- Use `README.md` files in directories for package-level documentation
+- The project README is at the root level
