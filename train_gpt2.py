@@ -17,6 +17,11 @@ Usage:
     uv run torchrun --nproc_per_node=4 train_gpt2.py --dataset wikipedia --num-tokens 0.1
 """
 
+import os
+
+# Disable tokenizers parallelism to avoid deadlocks when forking (e.g., wandb)
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 from typing import Annotated
 
 import torch

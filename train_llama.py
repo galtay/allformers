@@ -18,6 +18,10 @@ Usage:
 """
 
 import os
+
+# Disable tokenizers parallelism to avoid deadlocks when forking (e.g., wandb)
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 from typing import Annotated
 
 import torch
