@@ -19,12 +19,15 @@ Usage:
         set_seed,
         setup_ddp,
         cleanup_ddp,
+        cleanup_streaming_datasets,
         is_main_process,
         create_lr_schedule,
         run_training_loop,
     )
 """
 
+import atexit
+import gc
 import json
 import os
 import random
@@ -322,6 +325,33 @@ def cleanup_ddp():
     """Clean up DDP resources."""
     if is_ddp():
         dist.destroy_process_group()
+
+
+def cleanup_streaming_datasets(*datasets) -> None:
+    """Clean up streaming datasets to prevent process hanging on exit.
+
+    HuggingFace streaming datasets maintain background download threads
+    and network connections that can cause the process to hang when exiting.
+    This function explicitly clears references and forces garbage collection.
+
+    Call this after training completes, before cleanup_ddp().
+
+    Args:
+        *datasets: IterableDataset objects to clean up. Typically the
+            train_data and val_data returned by load_dataset_for_training().
+
+    Example:
+        train_data, val_data, text_fn = load_dataset_for_training(...)
+        # ... training code ...
+        cleanup_streaming_datasets(train_data, val_data)
+        cleanup_ddp()
+    """
+    # Delete references passed in (this helps but the caller should also
+    # delete their local references)
+    del datasets
+
+    # Force garbage collection to clean up background threads
+    gc.collect()
 
 
 # =============================================================================

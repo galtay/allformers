@@ -37,6 +37,7 @@ from train_base import (
     set_seed,
     setup_ddp,
     cleanup_ddp,
+    cleanup_streaming_datasets,
     is_main_process,
     create_lr_schedule,
     run_training_loop,
@@ -69,14 +70,14 @@ def train(
     fineweb_language: Annotated[str | None, typer.Option(help="[fineweb] Filter by language column (e.g., 'en'), None to disable")] = "en",
     fineweb_min_lang_score: Annotated[float | None, typer.Option(help="[fineweb] Min language detection confidence (0.0-1.0)")] = 0.8,
     # Training hyperparameters
-    num_tokens: Annotated[float, typer.Option(help="Total number of tokens to train on (in billions, e.g., 0.01 = 10M tokens)")] = 0.01,
+    num_tokens: Annotated[float, typer.Option(help="Total number of tokens to train on (in billions, e.g., 0.01 = 10M tokens)")] = 0.001,
     batch_size: Annotated[int, typer.Option(help="Batch size per GPU")] = 32,
     gradient_accumulate: Annotated[int, typer.Option(help="Gradient accumulation steps")] = 1,
     learning_rate: Annotated[float, typer.Option(help="Peak learning rate")] = 3e-4,
     warmup_ratio: Annotated[float, typer.Option(help="Fraction of training for LR warmup")] = 0.05,
     cooldown_ratio: Annotated[float, typer.Option(help="Fraction of training for LR cooldown")] = 0.5,
     min_learning_rate_frac: Annotated[float, typer.Option(help="Min LR as fraction of peak LR (e.g., 0.1 = 10%)")] = 0.1,
-    seq_len: Annotated[int, typer.Option(help="Sequence length")] = 1024,
+    seq_len: Annotated[int, typer.Option(help="Sequence length")] = 512,
     # Performance optimizations
     use_amp: Annotated[bool, typer.Option(help="Use mixed precision training (AMP)")] = True,
     use_compile: Annotated[bool, typer.Option(help="Use torch.compile for model optimization")] = True,
@@ -300,7 +301,12 @@ def train(
         wandb_run_name=wandb_run_name,
         metrics_file=metrics_file,
     )
-    
+
+    # Clean up streaming datasets to prevent hanging on exit
+    del train_iter, cached_val_batches
+    cleanup_streaming_datasets(train_data, val_data)
+    del train_data, val_data
+
     # Clean up DDP
     cleanup_ddp()
 
